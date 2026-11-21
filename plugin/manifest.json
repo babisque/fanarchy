@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "babisque.fanarchy",
+  "name": "Fanarchy",
+  "version": "0.1.0",
+  "author": "babisque",
+  "description": "CPU temperature and fan speeds in the bar, with a fan curve editor",
+  "kinds": [
+    "bar-widget",
+    "panel"
+  ],
+  "entryPoints": {
+    "barWidget": "Bar.qml",
+    "panel": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Fanarchy",
+    "description": "CPU temperature and fan speeds",
+    "category": "System",
+    "allowMultiple": false
+  }
+}

@@ -1,0 +1,24 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+
+# Arch packaging build artifacts
+/packaging/pkg/
+/packaging/src/
+/packaging/*.pkg.tar.*
+/packaging/*.tar.gz
+
+# Local dev config / runtime
+/config.local.json
+*.sock
+
+# Editors / OS
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+
+# Claude Code local settings
+.claude/settings.local.json

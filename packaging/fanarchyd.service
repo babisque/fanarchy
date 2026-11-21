@@ -1,0 +1,20 @@
+[Unit]
+Description=Fanarchy fan control daemon
+Documentation=https://github.com/babisque/fanarchy
+After=systemd-modules-load.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/fanarchyd
+Restart=on-failure
+RestartSec=2
+
+# Hardening
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+ReadWritePaths=/sys/class/hwmon /etc/fanarchy /run
+
+[Install]
+WantedBy=multi-user.target

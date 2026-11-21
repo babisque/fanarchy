@@ -1,0 +1,26 @@
+# Maintainer: babisque
+# Skeleton only. Finished and checked with namcap in Phase 6.
+
+pkgname=fanarchy
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Fan control for Omarchy: hwmon fan curves daemon and CLI"
+arch=('x86_64')
+url="https://github.com/babisque/fanarchy"
+license=('MIT')
+depends=('gcc-libs')
+makedepends=('cargo')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+  cd "$pkgname-$pkgver"
+  cargo build --release --locked
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  install -Dm755 target/release/fanarchyd "$pkgdir/usr/bin/fanarchyd"
+  install -Dm755 target/release/fanarchyctl "$pkgdir/usr/bin/fanarchyctl"
+  install -Dm644 packaging/fanarchyd.service "$pkgdir/usr/lib/systemd/system/fanarchyd.service"
+}
