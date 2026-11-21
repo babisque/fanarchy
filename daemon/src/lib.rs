@@ -6,5 +6,7 @@
 pub mod config;
 pub mod control;
 pub mod curve;
+pub mod gpu;
 pub mod hwmon;
 pub mod ipc;
+pub mod status;
