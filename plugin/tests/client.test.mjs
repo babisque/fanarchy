@@ -200,3 +200,60 @@ test("transitions never mutate their input", () => {
   Client.onLine(start, JSON.stringify({ ok: true, data: sampleStatus() }));
   assert.equal(JSON.stringify(start), frozen);
 });
+
+// ---------------------------------------------------------------- commands
+
+test("request lines are single JSON lines", () => {
+  assert.equal(Client.requestLine(Client.getConfigRequest()), '{"cmd":"get_config"}\n');
+  assert.equal(
+    Client.requestLine(Client.setCurveRequest("case", [[30, 25], [80, 100]])),
+    '{"cmd":"set_curve","fan":"case","points":[[30,25],[80,100]]}\n',
+  );
+});
+
+test("set_mode only sends percent with fixed", () => {
+  assert.deepEqual(plain(Client.setModeRequest("case", "fixed", 59.6)), {
+    cmd: "set_mode", fan: "case", mode: "fixed", percent: 60,
+  });
+  assert.deepEqual(plain(Client.setModeRequest("case", "auto", 60)), { cmd: "set_mode", fan: "case", mode: "auto" });
+  assert.deepEqual(plain(Client.setModeRequest("case", "curve")), { cmd: "set_mode", fan: "case", mode: "curve" });
+});
+
+test("replies settle requests in order", () => {
+  let queue = Client.enqueue([], Client.getConfigRequest());
+  queue = Client.enqueue(queue, Client.setCurveRequest("case", [[30, 25], [80, 100]]));
+  assert.equal(queue.length, 2);
+
+  const first = Client.settle(queue, '{"ok":true,"data":{"version":1}}');
+  assert.equal(first.request.cmd, "get_config");
+  assert.equal(first.ok, true);
+  assert.equal(first.data.version, 1);
+
+  const second = Client.settle(first.queue, "{\"ok\":false,\"error\":\"fan 'case' is a pump and cannot be controlled\"}");
+  assert.equal(second.request.cmd, "set_curve");
+  assert.equal(second.ok, false);
+  assert.equal(second.error, "fan 'case' is a pump and cannot be controlled");
+  assert.equal(second.queue.length, 0);
+});
+
+test("an ok reply without data settles with null", () => {
+  const result = Client.settle([Client.setModeRequest("case", "auto")], '{"ok":true}');
+  assert.equal(result.ok, true);
+  assert.equal(result.data, null);
+});
+
+test("blank, unreadable and unexpected replies", () => {
+  const queue = [Client.getConfigRequest()];
+  const blank = Client.settle(queue, "  ");
+  assert.equal(blank.request, null);
+  assert.equal(blank.queue, queue);
+
+  const broken = Client.settle(queue, "{nope");
+  assert.equal(broken.request.cmd, "get_config");
+  assert.equal(broken.ok, false);
+  assert.equal(broken.queue.length, 0);
+
+  const stray = Client.settle([], '{"ok":true}');
+  assert.equal(stray.request, null);
+  assert.match(stray.log, /no request/);
+});

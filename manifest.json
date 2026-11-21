@@ -7,6 +7,7 @@
   "license": "MIT",
   "description": "Fan curves for Omarchy. No masters, no stock curves.",
   "kinds": ["bar-widget", "panel"],
+  "keepLoaded": true,
   "entryPoints": {
     "barWidget": "plugin/BarWidget.qml",
     "panel": "plugin/Panel.qml"

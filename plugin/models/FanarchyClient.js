@@ -148,3 +148,66 @@ function view(state) {
     downReason: current === "down" ? downReason(state ? state.error : null) : null
   }
 }
+
+// ---------------------------------------------------------------- commands
+//
+// The panel sends requests on a second connection (a subscribed one ignores
+// further requests). The daemon answers each request with exactly one line,
+// in order, so pending requests are a FIFO queue.
+
+function requestLine(request) {
+  return JSON.stringify(request) + "\n"
+}
+
+function getConfigRequest() {
+  return { cmd: "get_config" }
+}
+
+function setCurveRequest(fanId, points) {
+  var copy = []
+  for (var i = 0; i < points.length; i++) copy.push([Number(points[i][0]), Number(points[i][1])])
+  return { cmd: "set_curve", fan: String(fanId), points: copy }
+}
+
+// `mode` is "curve", "fixed" or "auto". `percent` is only sent with fixed.
+function setModeRequest(fanId, mode, percent) {
+  var request = { cmd: "set_mode", fan: String(fanId), mode: String(mode) }
+  if (mode === "fixed") request.percent = Math.round(Number(percent))
+  return request
+}
+
+function enqueue(queue, request) {
+  return (queue || []).concat([request])
+}
+
+// Pair one response line with the oldest pending request. Returns
+// { queue, request, ok, data, error, log }; `request` is null when the
+// line was blank, malformed or unexpected.
+function settle(queue, line) {
+  var pending = queue || []
+  var text = String(line === undefined || line === null ? "" : line).trim()
+  if (text === "") return { queue: pending, request: null, ok: false, data: null, error: null, log: null }
+
+  var message = null
+  try { message = JSON.parse(text) } catch (e) { message = null }
+  var request = pending.length > 0 ? pending[0] : null
+  var rest = pending.slice(1)
+
+  if (!message || typeof message !== "object") {
+    // Still one line for one request: drop the request so the queue stays aligned.
+    return {
+      queue: rest, request: request, ok: false, data: null,
+      error: "the daemon sent an unreadable reply",
+      log: "fanarchy: unreadable reply from the daemon"
+    }
+  }
+  if (!request) {
+    return { queue: pending, request: null, ok: false, data: null, error: null, log: "fanarchy: reply with no request" }
+  }
+  if (message.ok === true) {
+    return { queue: rest, request: request, ok: true, data: message.data === undefined ? null : message.data, error: null, log: null }
+  }
+  var error = typeof message.error === "string" ? message.error : "the daemon refused the request"
+  return { queue: rest, request: request, ok: false, data: null, error: error, log: null }
+}
+
