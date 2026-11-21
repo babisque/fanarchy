@@ -4,10 +4,14 @@
 //! through the [`Hwmon`] trait so it can be tested against a fake `/sys`.
 //! Chips are always found by their `name` file, never by `hwmonN` index.
 //!
-//! Phase 1 is read-only: nothing in this module writes to any file.
+//! Writes only ever target `pwmN` and `pwmN_enable` of an [`OutputRef`],
+//! and `pwmN` only accepts a [`Duty`] that passed the safety rules.
 
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
+
+use crate::safety::Duty;
 
 /// Default location of the hwmon class directory.
 pub const DEFAULT_HWMON_ROOT: &str = "/sys/class/hwmon";
@@ -28,6 +32,12 @@ const MAX_VALID_RPM: u32 = 30_000;
 pub enum HwmonError {
     #[error("cannot list hwmon root {path}: {source}")]
     RootUnreadable {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("cannot write {path}: {source}")]
+    Write {
         path: PathBuf,
         #[source]
         source: std::io::Error,
@@ -86,12 +96,46 @@ pub enum PwmMode {
     Automatic(u32),
 }
 
+impl PwmMode {
+    /// The raw value of `pwmN_enable` for this mode.
+    pub fn raw(self) -> u32 {
+        match self {
+            PwmMode::Disabled => 0,
+            PwmMode::Manual => 1,
+            PwmMode::Automatic(n) => n,
+        }
+    }
+}
+
+/// One `pwmN` output on a chip found during discovery.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct OutputRef {
+    /// [`Chip::path`] of the chip. Valid for this boot only.
+    pub chip_path: PathBuf,
+    /// The `N` in `pwmN`.
+    pub index: u32,
+}
+
+impl OutputRef {
+    pub fn pwm_path(&self) -> PathBuf {
+        self.chip_path.join(format!("pwm{}", self.index))
+    }
+
+    pub fn enable_path(&self) -> PathBuf {
+        self.chip_path.join(format!("pwm{}_enable", self.index))
+    }
+}
+
 /// Thin abstraction over hwmon access.
-///
-/// Write methods arrive in Phase 2.
 pub trait Hwmon {
     /// Every chip found, sorted by name.
     fn chips(&self) -> Result<Vec<Chip>, HwmonError>;
+
+    /// Write a duty cycle to `pwmN`.
+    fn write_pwm(&self, output: &OutputRef, duty: Duty) -> Result<(), HwmonError>;
+
+    /// Write a mode to `pwmN_enable`.
+    fn write_enable(&self, output: &OutputRef, mode: PwmMode) -> Result<(), HwmonError>;
 }
 
 /// Real implementation reading from a hwmon class directory.
@@ -140,6 +184,33 @@ impl Hwmon for SysHwmon {
         chips.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.path.cmp(&b.path)));
         Ok(chips)
     }
+
+    fn write_pwm(&self, output: &OutputRef, duty: Duty) -> Result<(), HwmonError> {
+        let path = output.pwm_path();
+        tracing::debug!(path = %path.display(), value = duty.raw(), "write pwm");
+        write_attr(&path, &duty.raw().to_string())
+    }
+
+    fn write_enable(&self, output: &OutputRef, mode: PwmMode) -> Result<(), HwmonError> {
+        let path = output.enable_path();
+        tracing::debug!(path = %path.display(), value = mode.raw(), "write pwm_enable");
+        write_attr(&path, &mode.raw().to_string())
+    }
+}
+
+/// Write a sysfs attribute. Never creates files: a missing attribute is
+/// an error, exactly like on real sysfs.
+fn write_attr(path: &Path, value: &str) -> Result<(), HwmonError> {
+    let to_error = |source| HwmonError::Write {
+        path: path.to_path_buf(),
+        source,
+    };
+    let mut file = OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(path)
+        .map_err(to_error)?;
+    file.write_all(value.as_bytes()).map_err(to_error)
 }
 
 /// Read one chip directory. Returns `None` if it has no `name`.
@@ -456,6 +527,14 @@ mod tests {
         ];
         for (input, expected) in cases {
             assert_eq!(parse_pwm_mode(input), *expected, "input: {input:?}");
+        }
+    }
+
+    #[test]
+    fn pwm_mode_raw_round_trips() {
+        for raw in ["0", "1", "2", "5"] {
+            let mode = parse_pwm_mode(raw).unwrap();
+            assert_eq!(mode.raw().to_string(), raw);
         }
     }
 

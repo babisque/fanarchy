@@ -5,7 +5,10 @@ After=systemd-modules-load.service
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/fanarchyd
+ExecStart=/usr/bin/fanarchyd run
+# Runs after every stop, including SIGKILL and OOM kills: hands every
+# controlled fan back to the BIOS. Pumps are never touched.
+ExecStopPost=/usr/bin/fanarchyd restore
 Restart=on-failure
 RestartSec=2
 

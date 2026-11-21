@@ -18,7 +18,7 @@ Fan control for Omarchy: a root daemon that applies fan curves through `hwmon`, 
 | fan2 | `fan2_input` | none | **AIO pump. Read-only. Never write to `pwm2`.** |
 | fan3 | `fan3_input` | `pwm3` | Case fans |
 
-- The `hwmon` index changes between boots. Find the device by `name == it8689`, never hardcode `hwmonN`.
+- The `hwmon` index changes between boots. Find the device by name, never hardcode `hwmonN`. The out-of-tree driver reports `it8689_61030507`; the suffix may change between driver versions, so the config uses `it8689` and matches `it8689` or `it8689_*` (more than one match refuses to start).
 - `pwmN_enable`: `1` = manual, `2` = automatic (BIOS). Original value is `2`.
 
 ## Run commands

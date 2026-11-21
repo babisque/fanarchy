@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "chips": {
+    "board": "it8689",
+    "cpu": "k10temp"
+  },
+  "fans": [
+    {
+      "id": "radiator",
+      "label": "Radiator fans",
+      "chip": "board",
+      "pwm": 1,
+      "role": "fan",
+      "sensor": "cpu/temp1",
+      "curve": [[40, 30], [60, 50], [75, 80], [85, 100]],
+      "min_percent": 25
+    },
+    {
+      "id": "pump",
+      "label": "AIO pump",
+      "chip": "board",
+      "pwm": 2,
+      "role": "pump"
+    },
+    {
+      "id": "case",
+      "label": "Case fans",
+      "chip": "board",
+      "pwm": 3,
+      "role": "fan",
+      "sensor": "cpu/temp1",
+      "curve": [[40, 25], [65, 45], [80, 100]],
+      "min_percent": 20
+    }
+  ],
+  "safety": {
+    "critical_temp_c": 85,
+    "sensor_fail_percent": 100,
+    "cpu_sensor": "cpu/temp1"
+  }
+}

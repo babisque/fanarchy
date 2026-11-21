@@ -309,3 +309,48 @@ fn snapshot(root: &std::path::Path) -> Vec<(String, String)> {
     out.sort();
     out
 }
+
+fn output(fake: &FakeHwmon, dir: &str, index: u32) -> fanarchyd::hwmon::OutputRef {
+    fanarchyd::hwmon::OutputRef {
+        chip_path: fake.root().join(dir),
+        index,
+    }
+}
+
+/// A valid duty obtained the only way possible: through the safety clamp.
+fn duty(percent: f32) -> fanarchyd::safety::Duty {
+    fanarchyd::safety::clamp(percent, 1, fanarchyd::safety::Override::None, 100)
+}
+
+#[test]
+fn writes_pwm_and_enable_through_symlink() {
+    let fake = FakeHwmon::new();
+    fake.chip("hwmon5", "it8689").pwm(1, "255", Some("2"));
+    let out = output(&fake, "hwmon5", 1);
+
+    fake.write_enable(&out, PwmMode::Manual).unwrap();
+    fake.write_pwm(&out, duty(50.0)).unwrap();
+
+    assert_eq!(fake.read("hwmon5", "pwm1_enable"), "1");
+    assert_eq!(fake.read("hwmon5", "pwm1"), "128");
+    assert_eq!(
+        only_chip(&fake).pwms,
+        [pwm(1, Some(128), Some(PwmMode::Manual))]
+    );
+}
+
+#[test]
+fn write_never_creates_missing_files() {
+    let fake = FakeHwmon::new();
+    let chip = fake.chip("hwmon5", "it8689");
+    chip.pwm(1, "255", None);
+    let out = output(&fake, "hwmon5", 1);
+
+    let err = fake.write_enable(&out, PwmMode::Manual).unwrap_err();
+    assert!(matches!(err, HwmonError::Write { .. }), "{err:?}");
+    assert!(!chip.path.join("pwm1_enable").exists());
+
+    let missing = output(&fake, "hwmon5", 9);
+    assert!(fake.write_pwm(&missing, duty(50.0)).is_err());
+    assert!(!chip.path.join("pwm9").exists());
+}
