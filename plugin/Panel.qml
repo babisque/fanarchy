@@ -3,7 +3,8 @@ import qs.Commons
 import qs.Ui
 
 // Fanarchy panel: fan list and curve editor.
-// Placeholder until Phase 5 builds the real UI.
+// Placeholder until Phase 5 builds the real UI. The bar widget toggles it
+// with `omarchy-shell shell toggle io.github.babisque.fanarchy`.
 Item {
   id: root
 

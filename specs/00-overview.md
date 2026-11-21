@@ -28,6 +28,7 @@
 * **Format:** `cargo fmt`
 * **Daemon (dev):** `cargo build && sudo ./target/debug/fanarchyd run`
 * **Validate plugin:** `omarchy plugin validate .`
+* **Test plugin models:** `node --test plugin/tests/`
 * **Enable plugin:** `omarchy plugin enable io.github.babisque.fanarchy --section right`
 * **Plugin logs:** run `omarchy-shell` from a terminal
 

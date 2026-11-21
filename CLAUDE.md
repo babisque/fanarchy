@@ -1,6 +1,6 @@
 # fanarchy
 
-Fan control for Omarchy: a root daemon that applies fan curves through `hwmon`, plus an Omarchy shell plugin (`babisque.fanarchy`) that shows temps/RPM in the bar and edits curves in a panel. A Linux take on the Windows app FanControl.
+Fan control for Omarchy: a root daemon that applies fan curves through `hwmon`, plus an Omarchy shell plugin (`io.github.babisque.fanarchy`) that shows temps/RPM in the bar and edits curves in a panel. A Linux take on the Windows app FanControl.
 
 ## Stack
 - Daemon: Rust (stable, edition 2024), `tokio` async runtime, run as a systemd unit (root)
@@ -27,8 +27,9 @@ Fan control for Omarchy: a root daemon that applies fan curves through `hwmon`, 
 - lint: `cargo clippy -- -D warnings`
 - format: `cargo fmt`
 - run daemon (dev): `cargo build && sudo ./target/debug/fanarchyd`
-- validate plugin: `omarchy plugin validate plugin/`
-- enable plugin: `omarchy plugin enable babisque.fanarchy --section right`
+- validate plugin: `omarchy plugin validate .` (manifest.json lives at the repo root)
+- test plugin models: `node --test plugin/tests/`
+- enable plugin: `omarchy plugin enable io.github.babisque.fanarchy --section right`
 - plugin logs: run `omarchy-shell` from a terminal
 - read sensors: `sensors`
 

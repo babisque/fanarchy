@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.babisque.fanarchy",
+  "name": "Fanarchy",
+  "version": "0.1.0",
+  "author": "babisque",
+  "license": "MIT",
+  "description": "Fan curves for Omarchy. No masters, no stock curves.",
+  "kinds": ["bar-widget", "panel"],
+  "entryPoints": {
+    "barWidget": "plugin/BarWidget.qml",
+    "panel": "plugin/Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Fanarchy",
+    "description": "CPU temperature and fan speeds from fanarchyd",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
