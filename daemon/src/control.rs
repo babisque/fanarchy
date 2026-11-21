@@ -212,12 +212,17 @@ impl<H: Hwmon> Controller<H> {
 }
 
 fn take_control<H: Hwmon>(hwmon: &H, fan: &ControlledFan, duty: Duty) -> Result<(), ControlError> {
-    if let Err(err) = hwmon.write_pwm(&fan.output, duty) {
-        tracing::warn!(
+    match hwmon.write_pwm(&fan.output, duty) {
+        Ok(()) => {}
+        Err(err) if err.is_busy() => tracing::debug!(
+            fan = %fan.id,
+            "pwm pre-write rejected with EBUSY (driver refuses pwm writes in automatic mode), switching to manual"
+        ),
+        Err(err) => tracing::warn!(
             fan = %fan.id,
             %err,
-            "pwm pre-write rejected (chip still automatic?), switching to manual anyway"
-        );
+            "pwm pre-write rejected, switching to manual anyway"
+        ),
     }
     let takeover = |source| ControlError::Takeover {
         fan: fan.id.clone(),

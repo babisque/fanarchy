@@ -99,13 +99,32 @@ fn takes_control_with_safe_pwm_first() {
 }
 
 #[test]
-fn rejected_pre_write_is_tolerated() {
+fn ebusy_pre_write_in_automatic_mode_is_tolerated() {
+    // Real it87 behaviour: pwmN writes fail with EBUSY while enable = 2.
     let mut recording = RecordingHwmon::new(FakeHwmon::from_fixture("it8689_k10temp"));
     recording.reject_pwm_in_auto = true;
     let hw = Arc::new(recording);
+
     Controller::start(Arc::clone(&hw), plan(&hw, &example_config())).unwrap();
+
+    // Pre-write attempted (and rejected), then manual, then the duty.
+    let pwm1: Vec<Write> = hw
+        .writes()
+        .into_iter()
+        .filter(|w| w.file().starts_with(&format!("{BOARD}/pwm1")))
+        .collect();
+    assert_eq!(
+        pwm1,
+        [
+            Write::Pwm(format!("{BOARD}/pwm1"), 98),
+            Write::Enable(format!("{BOARD}/pwm1_enable"), 1),
+            Write::Pwm(format!("{BOARD}/pwm1"), 98),
+        ]
+    );
     assert_eq!(board(&hw, "pwm1"), RADIATOR_START);
     assert_eq!(board(&hw, "pwm1_enable"), "1");
+    assert_eq!(board(&hw, "pwm3"), CASE_START);
+    assert_eq!(board(&hw, "pwm3_enable"), "1");
 }
 
 #[test]

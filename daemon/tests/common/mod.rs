@@ -125,7 +125,8 @@ pub struct RecordingHwmon {
     pub fake: FakeHwmon,
     writes: Mutex<Vec<Write>>,
     failing: Mutex<HashSet<String>>,
-    /// Mimic it87 chips that reject `pwmN` while `pwmN_enable` is not 1.
+    /// Mimic the it87 driver: `pwmN` writes fail with EBUSY while
+    /// `pwmN_enable` is not 1 (manual).
     pub reject_pwm_in_auto: bool,
 }
 
@@ -190,7 +191,11 @@ impl Hwmon for RecordingHwmon {
         if self.reject_pwm_in_auto
             && self.fake.read(&dir, &format!("pwm{}_enable", output.index)) != "1"
         {
-            return Err(simulated_error(&file, "device busy (automatic mode)"));
+            return Err(HwmonError::Write {
+                path: PathBuf::from(file),
+                // EBUSY, as returned by the it87 driver.
+                source: std::io::Error::from_raw_os_error(16),
+            });
         }
         self.fake.write_pwm(output, duty)
     }

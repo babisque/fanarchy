@@ -7,9 +7,11 @@
 //! Writes only ever target `pwmN` and `pwmN_enable` of an [`OutputRef`],
 //! and `pwmN` only accepts a [`Duty`] that passed the safety rules.
 
+use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard};
 
 use crate::safety::Duty;
 
@@ -139,14 +141,21 @@ pub trait Hwmon {
 }
 
 /// Real implementation reading from a hwmon class directory.
-#[derive(Debug, Clone)]
+///
+/// `*_label` files never change while a chip exists, so each one is read
+/// once and cached: the control loop calls [`Hwmon::chips`] every tick.
+#[derive(Debug)]
 pub struct SysHwmon {
     root: PathBuf,
+    labels: LabelCache,
 }
 
 impl SysHwmon {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: root.into(),
+            labels: LabelCache::default(),
+        }
     }
 
     pub fn root(&self) -> &Path {
@@ -157,6 +166,39 @@ impl SysHwmon {
 impl Default for SysHwmon {
     fn default() -> Self {
         Self::new(DEFAULT_HWMON_ROOT)
+    }
+}
+
+impl Clone for SysHwmon {
+    fn clone(&self) -> Self {
+        Self {
+            root: self.root.clone(),
+            labels: LabelCache(Mutex::new(self.labels.lock().clone())),
+        }
+    }
+}
+
+/// Label file path → label (`None` when missing or empty).
+#[derive(Debug, Default)]
+struct LabelCache(Mutex<HashMap<PathBuf, Option<String>>>);
+
+impl LabelCache {
+    fn lock(&self) -> MutexGuard<'_, HashMap<PathBuf, Option<String>>> {
+        // A poisoned cache still holds valid labels.
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn get(&self, dir: &Path, prefix: &str, index: u32) -> Option<String> {
+        let path = dir.join(format!("{prefix}{index}_label"));
+        let mut cache = self.lock();
+        if let Some(label) = cache.get(&path) {
+            return label.clone();
+        }
+        let label = read_optional_attr(&path).filter(|l| !l.is_empty());
+        cache.insert(path, label.clone());
+        label
     }
 }
 
@@ -174,7 +216,7 @@ impl Hwmon for SysHwmon {
             if !dir.is_dir() {
                 continue;
             }
-            match read_chip(&dir) {
+            match read_chip(&dir, &self.labels) {
                 Some(chip) => chips.push(chip),
                 None => {
                     tracing::warn!(path = %dir.display(), "hwmon entry has no readable name, skipping")
@@ -198,6 +240,18 @@ impl Hwmon for SysHwmon {
     }
 }
 
+impl HwmonError {
+    /// The driver refused a write because the device is busy (`EBUSY`).
+    /// The it87 driver returns this for `pwmN` while `pwmN_enable` is
+    /// automatic.
+    pub fn is_busy(&self) -> bool {
+        match self {
+            HwmonError::Write { source, .. } => source.kind() == std::io::ErrorKind::ResourceBusy,
+            HwmonError::RootUnreadable { .. } => false,
+        }
+    }
+}
+
 /// Write a sysfs attribute. Never creates files: a missing attribute is
 /// an error, exactly like on real sysfs.
 fn write_attr(path: &Path, value: &str) -> Result<(), HwmonError> {
@@ -214,7 +268,7 @@ fn write_attr(path: &Path, value: &str) -> Result<(), HwmonError> {
 }
 
 /// Read one chip directory. Returns `None` if it has no `name`.
-fn read_chip(dir: &Path) -> Option<Chip> {
+fn read_chip(dir: &Path, labels: &LabelCache) -> Option<Chip> {
     let name = read_attr(&dir.join("name")).filter(|n| !n.is_empty())?;
 
     let mut temp_indices = Vec::new();
@@ -248,7 +302,7 @@ fn read_chip(dir: &Path) -> Option<Chip> {
         .into_iter()
         .map(|index| TempSensor {
             index,
-            label: read_label(dir, "temp", index),
+            label: labels.get(dir, "temp", index),
             celsius: read_attr(&dir.join(format!("temp{index}_input")))
                 .as_deref()
                 .and_then(millidegrees_to_celsius),
@@ -259,7 +313,7 @@ fn read_chip(dir: &Path) -> Option<Chip> {
         .into_iter()
         .map(|index| Fan {
             index,
-            label: read_label(dir, "fan", index),
+            label: labels.get(dir, "fan", index),
             rpm: read_attr(&dir.join(format!("fan{index}_input")))
                 .as_deref()
                 .and_then(parse_rpm),
@@ -288,10 +342,6 @@ fn read_chip(dir: &Path) -> Option<Chip> {
     })
 }
 
-fn read_label(dir: &Path, prefix: &str, index: u32) -> Option<String> {
-    read_attr(&dir.join(format!("{prefix}{index}_label"))).filter(|l| !l.is_empty())
-}
-
 /// Names of the entries in a chip directory. Unreadable dirs yield nothing.
 fn list_file_names(dir: &Path) -> Vec<String> {
     match fs::read_dir(dir) {
@@ -302,6 +352,17 @@ fn list_file_names(dir: &Path) -> Vec<String> {
         Err(err) => {
             tracing::debug!(path = %dir.display(), %err, "cannot list chip directory");
             Vec::new()
+        }
+    }
+}
+
+/// Read an attribute that is often absent (labels). Logs at trace only.
+fn read_optional_attr(path: &Path) -> Option<String> {
+    match fs::read_to_string(path) {
+        Ok(text) => Some(text.trim().to_string()),
+        Err(err) => {
+            tracing::trace!(path = %path.display(), %err, "optional hwmon attribute missing");
+            None
         }
     }
 }
@@ -528,6 +589,23 @@ mod tests {
         for (input, expected) in cases {
             assert_eq!(parse_pwm_mode(input), *expected, "input: {input:?}");
         }
+    }
+
+    #[test]
+    fn detects_busy_write_errors() {
+        let write_error = |source| HwmonError::Write {
+            path: PathBuf::from("/fake/pwm1"),
+            source,
+        };
+        // EBUSY = 16 on Linux.
+        assert!(write_error(std::io::Error::from_raw_os_error(16)).is_busy());
+        assert!(!write_error(std::io::Error::from_raw_os_error(13)).is_busy());
+        assert!(!write_error(std::io::Error::other("boom")).is_busy());
+        let root = HwmonError::RootUnreadable {
+            path: PathBuf::from("/fake"),
+            source: std::io::Error::from_raw_os_error(16),
+        };
+        assert!(!root.is_busy());
     }
 
     #[test]

@@ -354,3 +354,21 @@ fn write_never_creates_missing_files() {
     assert!(fake.write_pwm(&missing, duty(50.0)).is_err());
     assert!(!chip.path.join("pwm9").exists());
 }
+
+#[test]
+fn labels_are_read_once_per_chip() {
+    let fake = FakeHwmon::new();
+    let chip = fake.chip("hwmon2", "k10temp");
+    chip.temp(1, "48000", Some("Tctl")).temp(3, "52000", None);
+    assert_eq!(only_chip(&fake).temps[0].label.as_deref(), Some("Tctl"));
+
+    // Changing label files after the first read has no effect: cached.
+    fs::remove_file(chip.path.join("temp1_label")).unwrap();
+    chip.file("temp3_label", "Tccd1\n");
+    let temps = only_chip(&fake).temps;
+    assert_eq!(temps[0].label.as_deref(), Some("Tctl"));
+    assert_eq!(temps[1].label, None);
+    // Readings are still fresh every call.
+    chip.temp(1, "60000", None);
+    assert_eq!(only_chip(&fake).temps[0].celsius, Some(60.0));
+}
