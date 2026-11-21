@@ -10,9 +10,14 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
+use std::fs::{self, File, OpenOptions};
+use std::io::Write;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+
+pub use fanarchy_protocol::Role;
 
 use crate::curve::CurvePoint;
 use crate::hwmon::{Chip, OutputRef, PwmMode};
@@ -40,7 +45,7 @@ const HYSTERESIS_RANGE: (f32, f32) = (0.0, 10.0);
 const STEP_RANGE: (f32, f32) = (1.0, 100.0);
 
 /// The whole config file.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub version: u32,
@@ -51,7 +56,7 @@ pub struct Config {
 }
 
 /// One `pwmN` output: a controlled fan or a pump that is never touched.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FanConfig {
     pub id: String,
@@ -62,32 +67,23 @@ pub struct FanConfig {
     pub pwm: u32,
     pub role: Role,
     /// `"<chip alias>/tempN"`. Required for fans, forbidden for pumps.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sensor: Option<String>,
     /// `[temp_c, percent]` points. Required for fans, forbidden for pumps.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub curve: Option<Vec<CurvePoint>>,
     /// Required for fans, forbidden for pumps.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_percent: Option<u8>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hysteresis_c: Option<f32>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub step_up_percent: Option<f32>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub step_down_percent: Option<f32>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Role {
-    /// Controlled by the daemon.
-    Fan,
-    /// Never written to, in any way.
-    Pump,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SafetyConfig {
     #[serde(default = "default_critical_temp_c")]
@@ -140,6 +136,22 @@ pub enum ConfigError {
     Parse(#[from] serde_json::Error),
     #[error("invalid config:\n{}", bullet_list(.0))]
     Invalid(Vec<ValidationError>),
+    #[error("cannot save config {path}: {source}")]
+    Write {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+impl ConfigError {
+    /// The error on one line, for socket replies.
+    pub fn one_line(&self) -> String {
+        match self {
+            ConfigError::Invalid(errors) => format!("invalid config: {}", semicolon_list(errors)),
+            other => other.to_string(),
+        }
+    }
 }
 
 /// One rule the config file breaks.
@@ -240,6 +252,14 @@ pub enum ResolveError {
     Invalid(ValidationError),
 }
 
+fn semicolon_list<T: fmt::Display>(items: &[T]) -> String {
+    items
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 fn bullet_list<T: fmt::Display>(items: &[T]) -> String {
     items
         .iter()
@@ -267,6 +287,115 @@ pub fn load(path: &Path) -> Result<Config, ConfigError> {
     let config = read(path)?;
     validate(&config).map_err(ConfigError::Invalid)?;
     Ok(config)
+}
+
+/// Write `config` to `path` atomically.
+///
+/// The JSON goes to `<path>.tmp` in the same directory, is flushed to
+/// disk and then renamed over `path`, so readers see either the old or
+/// the new file, never a partial one. The file keeps its permissions
+/// (`0644` for a new file).
+pub fn save_atomic(path: &Path, config: &Config) -> Result<(), ConfigError> {
+    let to_error = |source| ConfigError::Write {
+        path: path.to_path_buf(),
+        source,
+    };
+    let mut text =
+        serde_json::to_string_pretty(config).map_err(|err| to_error(std::io::Error::other(err)))?;
+    text.push('\n');
+
+    let mode = fs::metadata(path)
+        .map(|meta| meta.permissions().mode() & 0o777)
+        .unwrap_or(0o644);
+    let tmp = tmp_path(path);
+    let result = write_then_rename(&tmp, path, text.as_bytes(), mode);
+    if result.is_err() {
+        // Best effort: never leave a stray temp file behind.
+        let _ = fs::remove_file(&tmp);
+    }
+    result.map_err(to_error)
+}
+
+/// `<path>.tmp`, next to `path` so the rename stays on one filesystem.
+pub fn tmp_path(path: &Path) -> PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".tmp");
+    path.with_file_name(name)
+}
+
+fn write_then_rename(tmp: &Path, path: &Path, bytes: &[u8], mode: u32) -> std::io::Result<()> {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(mode)
+        .open(tmp)?;
+    file.set_permissions(fs::Permissions::from_mode(mode))?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    drop(file);
+    fs::rename(tmp, path)?;
+    // Make the rename itself durable.
+    let dir = match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        _ => Path::new("."),
+    };
+    File::open(dir)?.sync_all()
+}
+
+/// Why a change requested over the socket was refused.
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum ChangeError {
+    #[error("unknown fan id '{0}'")]
+    UnknownFan(String),
+    #[error("fan '{0}' is a pump and cannot be controlled")]
+    Pump(String),
+    #[error("{}", semicolon_list(.0))]
+    Invalid(Vec<ValidationError>),
+    #[error("percent is required for mode 'fixed'")]
+    PercentRequired,
+    #[error("percent is only allowed with mode 'fixed'")]
+    PercentNotAllowed,
+    #[error("fan '{fan}': percent {value} is out of range ({min}–100)")]
+    PercentOutOfRange { fan: String, value: u8, min: u8 },
+}
+
+/// The `role: fan` entry with this id. Pumps and unknown ids are errors.
+pub fn controllable_fan<'a>(config: &'a Config, id: &str) -> Result<&'a FanConfig, ChangeError> {
+    let fan = config
+        .fans
+        .iter()
+        .find(|fan| fan.id == id)
+        .ok_or_else(|| ChangeError::UnknownFan(id.to_string()))?;
+    match fan.role {
+        Role::Fan => Ok(fan),
+        Role::Pump => Err(ChangeError::Pump(id.to_string())),
+    }
+}
+
+/// A copy of `config` with a new curve for fan `id`, checked against
+/// every schema rule. `config` itself is left untouched.
+pub fn with_curve(
+    config: &Config,
+    id: &str,
+    curve: Vec<CurvePoint>,
+) -> Result<Config, ChangeError> {
+    controllable_fan(config, id)?;
+    let mut changed = config.clone();
+    for fan in changed.fans.iter_mut().filter(|fan| fan.id == id) {
+        fan.curve = Some(curve.clone());
+    }
+    validate(&changed).map_err(ChangeError::Invalid)?;
+    Ok(changed)
+}
+
+/// Whether two plans control exactly the same outputs. `reload` only
+/// accepts a new config when this holds.
+pub fn same_outputs(old: &Plan, new: &Plan) -> bool {
+    let outputs = |plan: &Plan| -> HashSet<OutputRef> {
+        plan.fans.iter().map(|fan| fan.output.clone()).collect()
+    };
+    old.fans.len() == new.fans.len() && outputs(old) == outputs(new)
 }
 
 /// Check every schema rule. Returns all broken rules at once.
@@ -1254,6 +1383,120 @@ mod tests {
             .map(|f| f.pwm)
             .collect();
         assert_eq!(pumps, [2]);
+    }
+
+    #[test]
+    fn with_curve_replaces_only_that_fan() {
+        let config = valid();
+        let curve = vec![(30.0, 25.0), (60.0, 50.0), (80.0, 100.0)];
+        let changed = with_curve(&config, "case", curve.clone()).unwrap();
+        assert_eq!(changed.fans[2].curve, Some(curve));
+        assert_eq!(changed.fans[0], config.fans[0]);
+        assert_eq!(changed.fans[1], config.fans[1]);
+    }
+
+    #[test]
+    fn with_curve_rejects_bad_changes() {
+        let config = valid();
+        let good = vec![(30.0, 25.0), (80.0, 100.0)];
+        let cases: Vec<(&str, Vec<CurvePoint>, ChangeError)> = vec![
+            ("cpu", good.clone(), ChangeError::UnknownFan("cpu".into())),
+            ("pump", good, ChangeError::Pump("pump".into())),
+            (
+                "case",
+                vec![(60.0, 50.0), (40.0, 60.0)],
+                ChangeError::Invalid(vec![ValidationError::CurveTempsNotIncreasing {
+                    fan: "case".into(),
+                }]),
+            ),
+            (
+                "case",
+                vec![(40.0, 50.0)],
+                ChangeError::Invalid(vec![ValidationError::CurveTooShort { fan: "case".into() }]),
+            ),
+        ];
+        for (fan, curve, expected) in cases {
+            assert_eq!(with_curve(&config, fan, curve), Err(expected), "{fan}");
+        }
+    }
+
+    #[test]
+    fn change_errors_are_short() {
+        assert_eq!(
+            ChangeError::UnknownFan("cpu".into()).to_string(),
+            "unknown fan id 'cpu'"
+        );
+        let invalid = ChangeError::Invalid(vec![
+            ValidationError::CurveTooShort { fan: "case".into() },
+            ValidationError::CurvePercentDecreasing { fan: "case".into() },
+        ]);
+        assert_eq!(
+            invalid.to_string(),
+            "fan 'case': curve needs at least 2 points; fan 'case': curve percentages must not decrease"
+        );
+    }
+
+    #[test]
+    fn serialized_config_parses_back_equal() {
+        let config = valid();
+        let text = serde_json::to_string_pretty(&config).unwrap();
+        assert_eq!(parse(&text).unwrap(), config);
+        // Optional fields that were not set stay out of the file.
+        assert!(!text.contains("null"));
+    }
+
+    #[test]
+    fn save_atomic_writes_a_loadable_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        fs::write(&path, "old").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+
+        let config = with_curve(&valid(), "case", vec![(30.0, 25.0), (80.0, 100.0)]).unwrap();
+        save_atomic(&path, &config).unwrap();
+
+        assert_eq!(load(&path).unwrap(), config);
+        assert!(!tmp_path(&path).exists());
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o640);
+    }
+
+    #[test]
+    fn failed_save_leaves_the_old_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        fs::write(&path, "old").unwrap();
+        // A directory in the way of the temp file makes the save fail.
+        fs::create_dir(tmp_path(&path)).unwrap();
+        assert!(matches!(
+            save_atomic(&path, &valid()),
+            Err(ConfigError::Write { .. })
+        ));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "old");
+    }
+
+    #[test]
+    fn same_outputs_compares_controlled_outputs() {
+        let chips = [chip("hwmon2", "k10temp"), chip("hwmon5", "it8689")];
+        let plan = resolve(&valid(), &chips).unwrap();
+
+        let mut curve_changed = valid();
+        fan_mut(&mut curve_changed, "case").curve = Some(vec![(30.0, 25.0), (80.0, 100.0)]);
+        assert!(same_outputs(
+            &plan,
+            &resolve(&curve_changed, &chips).unwrap()
+        ));
+
+        let mut moved = valid();
+        fan_mut(&mut moved, "case").pwm = 4;
+        let mut board = chip("hwmon5", "it8689");
+        board.pwms.push(PwmOutput {
+            index: 4,
+            value: Some(255),
+            mode: Some(PwmMode::Automatic(2)),
+        });
+        let chips = [chip("hwmon2", "k10temp"), board];
+        assert!(!same_outputs(&plan, &resolve(&moved, &chips).unwrap()));
     }
 
     #[test]

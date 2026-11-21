@@ -6,16 +6,19 @@
 //! which puts it back on shutdown, error or panic.
 
 use std::future::Future;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use fanarchy_protocol::{FanMode, Request, Response};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::MissedTickBehavior;
 
 use crate::config::{
-    self, Config, ControlledFan, Plan, ResolveError, ResolvedSensor, SafetySettings,
+    self, ChangeError, Config, ControlledFan, Plan, ResolveError, ResolvedSensor, SafetySettings,
 };
-use crate::curve;
+use crate::curve::{self, CurvePoint};
 use crate::hwmon::{Chip, Hwmon, HwmonError, OutputRef, PwmMode};
 use crate::safety::{self, Duty, Override};
 
@@ -90,14 +93,7 @@ pub fn step(
     fan_temp_c: Option<f32>,
 ) -> (FanState, Duty) {
     let over = safety::evaluate_override(cpu_temp_c, fan_temp_c, safety.critical_temp_c);
-    let anchor_c = match fan_temp_c {
-        Some(temp) => Some(curve::apply_hysteresis(
-            previous.anchor_c,
-            temp,
-            fan.hysteresis_c,
-        )),
-        None => previous.anchor_c,
-    };
+    let anchor_c = next_anchor(fan, previous, fan_temp_c);
     let requested = match (over, anchor_c) {
         (Override::None, Some(anchor)) => curve::smooth(
             previous.percent,
@@ -117,11 +113,143 @@ pub fn step(
     (state, duty)
 }
 
+/// The hysteresis anchor keeps following the sensor whatever the mode,
+/// so the curve is current when it takes over again.
+fn next_anchor(fan: &ControlledFan, previous: &FanState, fan_temp_c: Option<f32>) -> Option<f32> {
+    match fan_temp_c {
+        Some(temp) => Some(curve::apply_hysteresis(
+            previous.anchor_c,
+            temp,
+            fan.hysteresis_c,
+        )),
+        None => previous.anchor_c,
+    }
+}
+
+/// How a fan is driven, set over IPC. Runtime only: never saved, and
+/// every fan starts in [`Mode::Curve`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Mode {
+    #[default]
+    Curve,
+    /// A fixed speed in %, still raised to `min_percent`.
+    Fixed(u8),
+    /// Motherboard control, except while a safety override is active.
+    Auto,
+}
+
+impl Mode {
+    pub fn protocol(self) -> FanMode {
+        match self {
+            Mode::Curve => FanMode::Curve,
+            Mode::Fixed(_) => FanMode::Fixed,
+            Mode::Auto => FanMode::Auto,
+        }
+    }
+}
+
+/// Check a `set_mode` request for one fan.
+pub fn parse_mode(
+    fan: &ControlledFan,
+    mode: FanMode,
+    percent: Option<u8>,
+) -> Result<Mode, ChangeError> {
+    match (mode, percent) {
+        (FanMode::Fixed, None) => Err(ChangeError::PercentRequired),
+        (FanMode::Fixed, Some(value)) if !(fan.min_percent..=100).contains(&value) => {
+            Err(ChangeError::PercentOutOfRange {
+                fan: fan.id.clone(),
+                value,
+                min: fan.min_percent,
+            })
+        }
+        (FanMode::Fixed, Some(value)) => Ok(Mode::Fixed(value)),
+        (FanMode::Curve | FanMode::Auto, Some(_)) => Err(ChangeError::PercentNotAllowed),
+        (FanMode::Curve, None) => Ok(Mode::Curve),
+        (FanMode::Auto, None) => Ok(Mode::Auto),
+    }
+}
+
+/// What to do with a fan's output this tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Action {
+    /// Drive the fan at this duty (manual mode).
+    Write(Duty),
+    /// Hand the fan to the motherboard (`pwmN_enable = 2`).
+    Release,
+}
+
+/// One control step for one fan in any [`Mode`]. Pure.
+///
+/// Safety overrides apply in every mode: a critical CPU or a failed
+/// sensor always drives the fan through [`safety::clamp`], even in
+/// [`Mode::Auto`].
+pub fn step_mode(
+    fan: &ControlledFan,
+    safety: &SafetySettings,
+    previous: &FanState,
+    mode: Mode,
+    cpu_temp_c: Option<f32>,
+    fan_temp_c: Option<f32>,
+) -> (FanState, Action) {
+    let over = safety::evaluate_override(cpu_temp_c, fan_temp_c, safety.critical_temp_c);
+    let anchor_c = next_anchor(fan, previous, fan_temp_c);
+    let requested = match mode {
+        Mode::Curve => {
+            let (state, duty) = step(fan, safety, previous, cpu_temp_c, fan_temp_c);
+            return (state, Action::Write(duty));
+        }
+        Mode::Fixed(percent) => f32::from(percent),
+        Mode::Auto if over == Override::None => {
+            let state = FanState {
+                anchor_c,
+                percent: None,
+                over,
+            };
+            return (state, Action::Release);
+        }
+        // Overrides replace the requested value in `clamp`.
+        Mode::Auto => 100.0,
+    };
+    let duty = safety::clamp(requested, fan.min_percent, over, safety.sensor_fail_percent);
+    let state = FanState {
+        anchor_c,
+        percent: Some(duty.percent()),
+        over,
+    };
+    (state, Action::Write(duty))
+}
+
 #[derive(Debug, Clone, Copy)]
 struct FanRuntime {
     state: FanState,
+    mode: Mode,
     /// Last duty successfully written. `None` forces a write.
     written: Option<Duty>,
+    /// The output is handed to the motherboard (`pwmN_enable = 2`).
+    released: bool,
+    /// Last reading of the fan's sensor.
+    temp_c: Option<f32>,
+}
+
+/// One controlled fan in a [`ControlSnapshot`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct FanSnapshot {
+    pub id: String,
+    pub mode: Mode,
+    pub over: Override,
+    /// `None` while the motherboard drives the fan.
+    pub percent: Option<f32>,
+    pub temp_c: Option<f32>,
+}
+
+/// What the controller did on its last tick.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ControlSnapshot {
+    pub cpu_temp_c: Option<f32>,
+    pub fans: Vec<FanSnapshot>,
+    /// Every hwmon reading from the last tick.
+    pub chips: Vec<Chip>,
 }
 
 /// Drives the controlled fans of a [`Plan`].
@@ -130,6 +258,8 @@ pub struct Controller<H: Hwmon> {
     plan: Plan,
     fans: Vec<FanRuntime>,
     failed_ticks: u32,
+    cpu_temp_c: Option<f32>,
+    chips: Vec<Chip>,
 }
 
 impl<H: Hwmon> Controller<H> {
@@ -150,7 +280,10 @@ impl<H: Hwmon> Controller<H> {
             take_control(hwmon.as_ref(), fan, duty)?;
             fans.push(FanRuntime {
                 state,
+                mode: Mode::Curve,
                 written: Some(duty),
+                released: false,
+                temp_c: temp,
             });
         }
         Ok(Self {
@@ -158,6 +291,8 @@ impl<H: Hwmon> Controller<H> {
             plan,
             fans,
             failed_ticks: 0,
+            cpu_temp_c: cpu,
+            chips,
         })
     }
 
@@ -177,27 +312,21 @@ impl<H: Hwmon> Controller<H> {
 
         for (fan, runtime) in self.plan.fans.iter().zip(self.fans.iter_mut()) {
             let temp = read_sensor(&chips, &fan.sensor);
-            let (state, duty) = step(fan, &self.plan.safety, &runtime.state, cpu, temp);
+            let (state, action) = step_mode(
+                fan,
+                &self.plan.safety,
+                &runtime.state,
+                runtime.mode,
+                cpu,
+                temp,
+            );
             log_override_change(fan, &self.plan, runtime.state.over, state.over, cpu, temp);
             runtime.state = state;
-
-            if runtime.written == Some(duty) {
-                continue;
-            }
-            // Defence in depth: only outputs from the validated plan.
-            if !self.plan.controls(&fan.output) {
-                tracing::error!(fan = %fan.id, "refusing to write an output outside the plan");
-                continue;
-            }
-            match self.hwmon.write_pwm(&fan.output, duty) {
-                Ok(()) => runtime.written = Some(duty),
-                Err(err) => {
-                    tracing::warn!(fan = %fan.id, %err, "pwm write failed, retrying next tick");
-                    runtime.written = None;
-                    healthy = false;
-                }
-            }
+            runtime.temp_c = temp;
+            healthy &= apply(self.hwmon.as_ref(), &self.plan, fan, runtime, action);
         }
+        self.cpu_temp_c = cpu;
+        self.chips = chips;
 
         if healthy {
             self.failed_ticks = 0;
@@ -209,6 +338,178 @@ impl<H: Hwmon> Controller<H> {
         }
         Ok(())
     }
+}
+
+impl<H: Hwmon> Controller<H> {
+    pub fn plan(&self) -> &Plan {
+        &self.plan
+    }
+
+    /// The state after the last tick.
+    pub fn snapshot(&self) -> ControlSnapshot {
+        let fans = self
+            .plan
+            .fans
+            .iter()
+            .zip(&self.fans)
+            .map(|(fan, runtime)| FanSnapshot {
+                id: fan.id.clone(),
+                mode: runtime.mode,
+                over: runtime.state.over,
+                percent: if runtime.released {
+                    None
+                } else {
+                    runtime.state.percent
+                },
+                temp_c: runtime.temp_c,
+            })
+            .collect();
+        ControlSnapshot {
+            cpu_temp_c: self.cpu_temp_c,
+            fans,
+            chips: self.chips.clone(),
+        }
+    }
+
+    fn index_of(&self, id: &str) -> Result<usize, ChangeError> {
+        self.plan
+            .fans
+            .iter()
+            .position(|fan| fan.id == id)
+            .ok_or_else(|| ChangeError::UnknownFan(id.to_string()))
+    }
+
+    /// The controlled fan with this id.
+    pub fn fan(&self, id: &str) -> Result<&ControlledFan, ChangeError> {
+        let index = self.index_of(id)?;
+        Ok(&self.plan.fans[index])
+    }
+
+    /// Replace a fan's curve, from the next tick on. The curve must
+    /// already be validated.
+    pub fn set_curve(&mut self, id: &str, curve: Vec<CurvePoint>) -> Result<(), ChangeError> {
+        let index = self.index_of(id)?;
+        self.plan.fans[index].curve = curve;
+        Ok(())
+    }
+
+    /// Switch a fan's mode, from the next tick on.
+    pub fn set_mode(&mut self, id: &str, mode: Mode) -> Result<(), ChangeError> {
+        let index = self.index_of(id)?;
+        self.fans[index].mode = mode;
+        Ok(())
+    }
+
+    /// Match `config` against the hardware, as at startup.
+    pub fn resolve(&self, config: &Config) -> Result<Plan, ControlError> {
+        let chips = self.hwmon.chips()?;
+        config::resolve(config, &chips).map_err(ControlError::Resolve)
+    }
+
+    /// Switch to a plan controlling the same outputs (see
+    /// [`config::same_outputs`]). Every fan goes back to [`Mode::Curve`];
+    /// the rest of its state is kept, matched by output.
+    pub fn replace_plan(&mut self, plan: Plan) {
+        let fans = plan
+            .fans
+            .iter()
+            .map(|fan| {
+                let old = self
+                    .plan
+                    .fans
+                    .iter()
+                    .position(|old| old.output == fan.output)
+                    .map(|index| self.fans[index]);
+                match old {
+                    Some(runtime) => FanRuntime {
+                        mode: Mode::Curve,
+                        ..runtime
+                    },
+                    // Not reachable with the same outputs; force a takeover.
+                    None => FanRuntime {
+                        state: FanState::default(),
+                        mode: Mode::Curve,
+                        written: None,
+                        released: true,
+                        temp_c: None,
+                    },
+                }
+            })
+            .collect();
+        self.fans = fans;
+        self.plan = plan;
+    }
+}
+
+/// Carry out one fan's [`Action`]. Returns `false` on a hardware error.
+fn apply<H: Hwmon>(
+    hwmon: &H,
+    plan: &Plan,
+    fan: &ControlledFan,
+    runtime: &mut FanRuntime,
+    action: Action,
+) -> bool {
+    match action {
+        Action::Write(duty) if runtime.released => {
+            if !in_plan(plan, fan) {
+                return true;
+            }
+            match take_control(hwmon, fan, duty) {
+                Ok(()) => {
+                    runtime.released = false;
+                    runtime.written = Some(duty);
+                    true
+                }
+                Err(err) => {
+                    tracing::warn!(fan = %fan.id, %err, "cannot take the fan back, retrying next tick");
+                    runtime.written = None;
+                    false
+                }
+            }
+        }
+        Action::Write(duty) => {
+            if runtime.written == Some(duty) || !in_plan(plan, fan) {
+                return true;
+            }
+            match hwmon.write_pwm(&fan.output, duty) {
+                Ok(()) => {
+                    runtime.written = Some(duty);
+                    true
+                }
+                Err(err) => {
+                    tracing::warn!(fan = %fan.id, %err, "pwm write failed, retrying next tick");
+                    runtime.written = None;
+                    false
+                }
+            }
+        }
+        Action::Release => {
+            if runtime.released || !in_plan(plan, fan) {
+                return true;
+            }
+            match hwmon.write_enable(&fan.output, AUTOMATIC) {
+                Ok(()) => {
+                    tracing::info!(fan = %fan.id, "fan handed to the motherboard (auto mode)");
+                    runtime.released = true;
+                    runtime.written = None;
+                    true
+                }
+                Err(err) => {
+                    tracing::warn!(fan = %fan.id, %err, "cannot hand the fan to the motherboard, retrying next tick");
+                    false
+                }
+            }
+        }
+    }
+}
+
+/// Defence in depth: only outputs from the validated plan are written.
+fn in_plan(plan: &Plan, fan: &ControlledFan) -> bool {
+    let ok = plan.controls(&fan.output);
+    if !ok {
+        tracing::error!(fan = %fan.id, "refusing to write an output outside the plan");
+    }
+    ok
 }
 
 fn take_control<H: Hwmon>(hwmon: &H, fan: &ControlledFan, duty: Duty) -> Result<(), ControlError> {
@@ -386,8 +687,49 @@ where
     H: Hwmon + Send + Sync + 'static,
     F: Future<Output = ()>,
 {
+    serve(hwmon, config.clone(), panic_hook, shutdown, None).await
+}
+
+/// A request from an IPC client, with the channel for its reply.
+#[derive(Debug)]
+pub struct ControlRequest {
+    pub request: Request,
+    pub reply: oneshot::Sender<Response>,
+}
+
+/// What the control loop publishes after every tick and change.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Published {
+    /// The config in use, as saved on disk.
+    pub config: Config,
+    pub snapshot: ControlSnapshot,
+}
+
+/// The control loop's side of the IPC channel.
+pub struct Service {
+    /// Where `set_curve` saves and `reload` reads.
+    pub config_path: PathBuf,
+    pub requests: mpsc::Receiver<ControlRequest>,
+    pub published: watch::Sender<Option<Arc<Published>>>,
+}
+
+/// [`run`], also serving IPC requests when `service` is given.
+///
+/// The control loop owns the controller and the config; IPC clients only
+/// reach them through [`Service::requests`], one request at a time.
+pub async fn serve<H, F>(
+    hwmon: Arc<H>,
+    config: Config,
+    panic_hook: PanicHook,
+    shutdown: F,
+    service: Option<Service>,
+) -> Result<(), ControlError>
+where
+    H: Hwmon + Send + Sync + 'static,
+    F: Future<Output = ()>,
+{
     let chips = hwmon.chips()?;
-    let plan = config::resolve(config, &chips).map_err(ControlError::Resolve)?;
+    let plan = config::resolve(&config, &chips).map_err(ControlError::Resolve)?;
 
     let restorer = Arc::new(Restorer::new(Arc::clone(&hwmon), &plan));
     if panic_hook == PanicHook::Install {
@@ -396,7 +738,8 @@ where
     let _guard = RestoreGuard(Arc::clone(&restorer));
 
     let mut controller = Controller::start(hwmon, plan)?;
-    let result = run_loop(&mut controller, shutdown).await;
+    let mut state = Daemon { config, service };
+    let result = run_loop(&mut controller, &mut state, shutdown).await;
     if let Err(err) = &result {
         tracing::error!(%err, "control loop stopped");
     }
@@ -404,8 +747,37 @@ where
     result
 }
 
-/// Tick every [`TICK`] until `shutdown` completes.
-pub async fn run_loop<H, F>(controller: &mut Controller<H>, shutdown: F) -> Result<(), ControlError>
+/// The control loop's state besides the controller.
+struct Daemon {
+    config: Config,
+    service: Option<Service>,
+}
+
+impl Daemon {
+    fn publish<H: Hwmon>(&self, controller: &Controller<H>) {
+        if let Some(service) = &self.service {
+            service.published.send_replace(Some(Arc::new(Published {
+                config: self.config.clone(),
+                snapshot: controller.snapshot(),
+            })));
+        }
+    }
+
+    async fn next_request(&mut self) -> Option<ControlRequest> {
+        match &mut self.service {
+            Some(service) => service.requests.recv().await,
+            None => std::future::pending().await,
+        }
+    }
+}
+
+/// Tick every [`TICK`] until `shutdown` completes, serving requests in
+/// between. A change applied over IPC triggers a tick right away.
+async fn run_loop<H, F>(
+    controller: &mut Controller<H>,
+    state: &mut Daemon,
+    shutdown: F,
+) -> Result<(), ControlError>
 where
     H: Hwmon,
     F: Future<Output = ()>,
@@ -414,6 +786,7 @@ where
     interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
     // The first tick completes at once; `start` already applied the curve.
     interval.tick().await;
+    state.publish(controller);
     tokio::pin!(shutdown);
     loop {
         tokio::select! {
@@ -421,7 +794,85 @@ where
                 tracing::info!("shutdown requested");
                 return Ok(());
             }
-            _ = interval.tick() => controller.tick()?,
+            _ = interval.tick() => {
+                controller.tick()?;
+                state.publish(controller);
+            }
+            Some(ControlRequest { request, reply }) = state.next_request() => {
+                let response = match handle_request(controller, state, request) {
+                    Ok(response) => {
+                        interval.reset_immediately();
+                        response
+                    }
+                    Err(message) => Response::error(message),
+                };
+                state.publish(controller);
+                // The client may have gone away; nothing to do then.
+                let _ = reply.send(response);
+            }
+        }
+    }
+}
+
+/// Apply one change request. Nothing changes when it returns an error.
+fn handle_request<H: Hwmon>(
+    controller: &mut Controller<H>,
+    state: &mut Daemon,
+    request: Request,
+) -> Result<Response, String> {
+    let Some(service) = &state.service else {
+        return Err("IPC is not enabled".to_string());
+    };
+    match request {
+        Request::SetCurve { fan, points } => {
+            let changed = config::with_curve(&state.config, &fan, points.clone())
+                .map_err(|e| e.to_string())?;
+            controller.fan(&fan).map_err(|e| e.to_string())?;
+            config::save_atomic(&service.config_path, &changed).map_err(|e| e.one_line())?;
+            controller
+                .set_curve(&fan, points)
+                .map_err(|e| e.to_string())?;
+            state.config = changed;
+            tracing::info!(fan = %fan, "curve updated and saved");
+            Ok(Response::ok_empty())
+        }
+        Request::SetMode { fan, mode, percent } => {
+            config::controllable_fan(&state.config, &fan).map_err(|e| e.to_string())?;
+            let controlled = controller.fan(&fan).map_err(|e| e.to_string())?;
+            let mode = parse_mode(controlled, mode, percent).map_err(|e| e.to_string())?;
+            controller.set_mode(&fan, mode).map_err(|e| e.to_string())?;
+            tracing::info!(fan = %fan, ?mode, "mode changed");
+            Ok(Response::ok_empty())
+        }
+        Request::Reload => {
+            let config = config::load(&service.config_path).map_err(|e| e.one_line())?;
+            let plan = controller.resolve(&config).map_err(|e| match e {
+                ControlError::Resolve(errors) => format!(
+                    "config does not match the hardware: {}",
+                    errors
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                ),
+                other => other.to_string(),
+            })?;
+            if !config::same_outputs(controller.plan(), &plan) {
+                return Err(
+                    "controlled outputs changed; restart the daemon (sudo systemctl restart fanarchyd)"
+                        .to_string(),
+                );
+            }
+            for warning in config::warnings(&config) {
+                tracing::warn!("{warning}");
+            }
+            controller.replace_plan(plan);
+            state.config = config;
+            tracing::info!("config reloaded");
+            Ok(Response::ok_empty())
+        }
+        Request::Status | Request::GetConfig | Request::Subscribe => {
+            Err("this request is answered by the socket server".to_string())
         }
     }
 }
@@ -466,6 +917,8 @@ pub fn restore_from_config<H: Hwmon>(
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+
+    use fanarchy_protocol::FanMode;
 
     use super::*;
 
@@ -572,6 +1025,137 @@ mod tests {
         fan.min_percent = 40;
         let (_, duty) = step(&fan, &SAFETY, &FanState::default(), Some(30.0), Some(30.0));
         assert_eq!(duty.raw(), 102);
+    }
+
+    fn mode_step(mode: Mode, cpu: Option<f32>, temp: Option<f32>) -> (FanState, Action) {
+        step_mode(&fan(), &SAFETY, &FanState::default(), mode, cpu, temp)
+    }
+
+    fn written(action: Action) -> u8 {
+        match action {
+            Action::Write(duty) => duty.raw(),
+            Action::Release => panic!("expected a write, got a release"),
+        }
+    }
+
+    #[test]
+    fn curve_mode_matches_step() {
+        let (state, duty) = step(
+            &fan(),
+            &SAFETY,
+            &FanState::default(),
+            Some(50.0),
+            Some(50.0),
+        );
+        assert_eq!(
+            mode_step(Mode::Curve, Some(50.0), Some(50.0)),
+            (state, Action::Write(duty))
+        );
+    }
+
+    #[test]
+    fn fixed_mode_applies_safety_rules() {
+        // (mode, cpu, fan temp, expected raw pwm, expected override)
+        let cases = [
+            (Mode::Fixed(60), Some(50.0), Some(50.0), 153, Override::None),
+            // Below the 20 % minimum: raised to it.
+            (Mode::Fixed(10), Some(50.0), Some(50.0), 51, Override::None),
+            (
+                Mode::Fixed(60),
+                Some(90.0),
+                Some(50.0),
+                255,
+                Override::Critical,
+            ),
+            (
+                Mode::Fixed(60),
+                Some(50.0),
+                None,
+                255,
+                Override::SensorFailed,
+            ),
+        ];
+        for (mode, cpu, temp, raw, over) in cases {
+            let (state, action) = mode_step(mode, cpu, temp);
+            assert_eq!(written(action), raw, "{mode:?} {cpu:?} {temp:?}");
+            assert_eq!(state.over, over);
+        }
+    }
+
+    #[test]
+    fn fixed_mode_does_not_smooth() {
+        let previous = FanState {
+            anchor_c: Some(50.0),
+            percent: Some(30.0),
+            over: Override::None,
+        };
+        let (_, action) = step_mode(
+            &fan(),
+            &SAFETY,
+            &previous,
+            Mode::Fixed(100),
+            Some(50.0),
+            Some(50.0),
+        );
+        assert_eq!(written(action), 255);
+    }
+
+    #[test]
+    fn auto_mode_releases_unless_overridden() {
+        let (state, action) = mode_step(Mode::Auto, Some(50.0), Some(50.0));
+        assert_eq!(action, Action::Release);
+        assert_eq!(state.percent, None);
+        assert_eq!(state.anchor_c, Some(50.0));
+
+        let (state, action) = mode_step(Mode::Auto, Some(90.0), Some(50.0));
+        assert_eq!((written(action), state.over), (255, Override::Critical));
+
+        let (state, action) = mode_step(Mode::Auto, None, Some(50.0));
+        assert_eq!((written(action), state.over), (255, Override::SensorFailed));
+    }
+
+    #[test]
+    fn parses_set_mode_requests() {
+        let fan = fan();
+        let cases = [
+            (FanMode::Curve, None, Ok(Mode::Curve)),
+            (FanMode::Auto, None, Ok(Mode::Auto)),
+            (FanMode::Fixed, Some(60), Ok(Mode::Fixed(60))),
+            (FanMode::Fixed, Some(20), Ok(Mode::Fixed(20))),
+            (FanMode::Fixed, Some(100), Ok(Mode::Fixed(100))),
+            (FanMode::Fixed, None, Err(ChangeError::PercentRequired)),
+            (
+                FanMode::Fixed,
+                Some(19),
+                Err(ChangeError::PercentOutOfRange {
+                    fan: "case".into(),
+                    value: 19,
+                    min: 20,
+                }),
+            ),
+            (
+                FanMode::Fixed,
+                Some(101),
+                Err(ChangeError::PercentOutOfRange {
+                    fan: "case".into(),
+                    value: 101,
+                    min: 20,
+                }),
+            ),
+            (
+                FanMode::Curve,
+                Some(50),
+                Err(ChangeError::PercentNotAllowed),
+            ),
+            (FanMode::Auto, Some(50), Err(ChangeError::PercentNotAllowed)),
+        ];
+        for (mode, percent, expected) in cases {
+            assert_eq!(
+                parse_mode(&fan, mode, percent),
+                expected,
+                "{mode:?} {percent:?}"
+            );
+        }
     }
 
     #[test]

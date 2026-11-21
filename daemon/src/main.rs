@@ -5,12 +5,15 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
+use fanarchy_protocol::table::render_status;
 use fanarchyd::config::{self, CONFIG_PATH};
-use fanarchyd::control::{self, PanicHook};
+use fanarchyd::control::{self, PanicHook, Service};
 use fanarchyd::gpu::{GpuSensor, NvidiaSmi};
 use fanarchyd::hwmon::{Hwmon, SysHwmon};
-use fanarchyd::status::render_status;
+use fanarchyd::ipc::{self, SOCKET_PATH};
+use fanarchyd::status::GpuReading;
 use tokio::signal::unix::{SignalKind, signal};
+use tokio::sync::{mpsc, watch};
 use tracing_subscriber::EnvFilter;
 
 /// Fan control daemon for Omarchy.
@@ -27,6 +30,9 @@ enum Command {
     Run {
         #[arg(long, default_value = CONFIG_PATH)]
         config: PathBuf,
+        /// Where to create the IPC socket.
+        #[arg(long, default_value = SOCKET_PATH)]
+        socket: PathBuf,
     },
     /// Validate a config file and check it against the detected hardware
     /// (read-only).
@@ -45,14 +51,14 @@ fn main() -> Result<()> {
     init_logging();
     let cli = Cli::parse();
     match cli.command {
-        Command::Run { config } => run(&config),
+        Command::Run { config, socket } => run(&config, &socket),
         Command::CheckConfig { path } => check_config(&path),
         Command::Restore { config } => restore(&config),
         Command::Status => status(),
     }
 }
 
-fn run(path: &Path) -> Result<()> {
+fn run(path: &Path, socket: &Path) -> Result<()> {
     tracing::info!(version = env!("CARGO_PKG_VERSION"), config = %path.display(), "fanarchyd starting");
     let config = config::load(path)?;
     for warning in config::warnings(&config) {
@@ -71,8 +77,29 @@ fn run(path: &Path) -> Result<()> {
                 _ = interrupt.recv() => tracing::info!("received SIGINT"),
             }
         };
+        let (listener, _socket_file) = ipc::bind(socket, ipc::lookup_socket_group())?;
+        let (requests_tx, requests) = mpsc::channel(16);
+        let (published_tx, published) = watch::channel(None);
+        let (gpu_tx, gpu) = watch::channel(GpuReading::default());
+        let context = ipc::Context {
+            requests: requests_tx,
+            published,
+            gpu,
+        };
+        let server = tokio::spawn(ipc::serve(listener, context));
+        let gpu_poller = tokio::spawn(ipc::poll_gpus(NvidiaSmi::default(), gpu_tx));
+
+        let service = Service {
+            config_path: path.to_path_buf(),
+            requests,
+            published: published_tx,
+        };
         let hwmon = Arc::new(SysHwmon::default());
-        control::run(hwmon, &config, PanicHook::Install, shutdown).await?;
+        let result =
+            control::serve(hwmon, config, PanicHook::Install, shutdown, Some(service)).await;
+        server.abort();
+        gpu_poller.abort();
+        result?;
         Ok(())
     })
 }

@@ -3,11 +3,9 @@
 //! Pure functions only: temperature in, percent out. Safety limits
 //! (minimum floor, overrides) are applied afterwards by [`crate::safety`].
 
-/// One curve point: `(temperature in °C, fan speed in %)`.
-///
-/// Serialized as a `[temp_c, percent]` pair, the same shape the IPC
-/// `set_curve` message uses.
-pub type CurvePoint = (f32, f32);
+/// One curve point: `(temperature in °C, fan speed in %)`, serialized as
+/// a `[temp_c, percent]` pair, the same shape the IPC `set_curve` uses.
+pub use fanarchy_protocol::CurvePoint;
 
 /// Linearly interpolate the fan speed (%) for `temp_c`.
 ///

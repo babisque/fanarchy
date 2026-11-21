@@ -15,8 +15,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::{FakeHwmon, RecordingHwmon, Write};
-use fanarchyd::config::{self, Config, Plan};
-use fanarchyd::control::{self, ControlError, Controller, PanicHook, RestoreGuard, Restorer};
+use fanarchyd::config::{self, ChangeError, Config, Plan};
+use fanarchyd::control::{self, ControlError, Controller, Mode, PanicHook, RestoreGuard, Restorer};
 use fanarchyd::hwmon::Hwmon;
 
 const BOARD: &str = "hwmon5";
@@ -397,4 +397,117 @@ fn restore_command_reports_failures() {
     assert_eq!(report.failed, ["radiator"]);
     assert_eq!(board(&hw, "pwm1"), "255");
     assert_eq!(board(&hw, "pwm3_enable"), "2");
+}
+
+#[test]
+fn fixed_mode_sets_exact_speed() {
+    let hw = hardware();
+    let mut controller = Controller::start(Arc::clone(&hw), plan(&hw, &example_config())).unwrap();
+    controller.set_mode("case", Mode::Fixed(60)).unwrap();
+    controller.tick().unwrap();
+    // 60 % → 153, no smoothing.
+    assert_eq!(board(&hw, "pwm3"), "153");
+    assert_eq!(board(&hw, "pwm3_enable"), "1");
+    // The other fan keeps following its curve.
+    assert_eq!(board(&hw, "pwm1"), RADIATOR_START);
+}
+
+#[test]
+fn auto_mode_hands_fan_to_bios_but_keeps_safety() {
+    let hw = hardware();
+    let original = snapshot_untouchable(&hw);
+    let mut controller = Controller::start(Arc::clone(&hw), plan(&hw, &example_config())).unwrap();
+    hw.clear_writes();
+
+    controller.set_mode("case", Mode::Auto).unwrap();
+    controller.tick().unwrap();
+    controller.tick().unwrap();
+    // Exactly one write: pwm3_enable back to automatic.
+    assert_eq!(
+        hw.writes(),
+        [Write::Enable(format!("{BOARD}/pwm3_enable"), 2)]
+    );
+    let snapshot = controller.snapshot();
+    let case = snapshot.fans.iter().find(|f| f.id == "case").unwrap();
+    assert_eq!((case.mode, case.percent), (Mode::Auto, None));
+
+    // Critical CPU: the daemon takes the fan back at full speed.
+    hw.clear_writes();
+    set_cpu_temp(&hw, "90000");
+    controller.tick().unwrap();
+    assert_eq!(board(&hw, "pwm3"), "255");
+    assert_eq!(board(&hw, "pwm3_enable"), "1");
+    assert!(
+        hw.writes()
+            .contains(&Write::Enable(format!("{BOARD}/pwm3_enable"), 1))
+    );
+
+    // Cleared: back to the motherboard.
+    set_cpu_temp(&hw, "50000");
+    controller.tick().unwrap();
+    assert_eq!(board(&hw, "pwm3_enable"), "2");
+
+    // Back to curve mode: taken over again.
+    controller.set_mode("case", Mode::Curve).unwrap();
+    controller.tick().unwrap();
+    assert_eq!(board(&hw, "pwm3_enable"), "1");
+
+    assert_untouched(&hw, &original);
+}
+
+#[test]
+fn auto_mode_with_driver_rejecting_pwm_in_auto() {
+    // Taking the fan back must not get stuck on the it87 EBUSY behaviour.
+    let mut recording = RecordingHwmon::new(FakeHwmon::from_fixture("it8689_k10temp"));
+    recording.reject_pwm_in_auto = true;
+    let hw = Arc::new(recording);
+    let mut controller = Controller::start(Arc::clone(&hw), plan(&hw, &example_config())).unwrap();
+
+    controller.set_mode("case", Mode::Auto).unwrap();
+    controller.tick().unwrap();
+    assert_eq!(board(&hw, "pwm3_enable"), "2");
+    set_cpu_temp(&hw, "90000");
+    controller.tick().unwrap();
+    assert_eq!(board(&hw, "pwm3"), "255");
+    assert_eq!(board(&hw, "pwm3_enable"), "1");
+}
+
+#[test]
+fn unknown_or_pump_ids_cannot_be_changed() {
+    let hw = hardware();
+    let mut controller = Controller::start(Arc::clone(&hw), plan(&hw, &example_config())).unwrap();
+    for id in ["pump", "cpu"] {
+        assert_eq!(
+            controller.set_mode(id, Mode::Fixed(100)),
+            Err(ChangeError::UnknownFan(id.into()))
+        );
+        assert!(
+            controller
+                .set_curve(id, vec![(30.0, 100.0), (40.0, 100.0)])
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn replace_plan_keeps_outputs_and_resets_modes() {
+    let hw = hardware();
+    let config = example_config();
+    let mut controller = Controller::start(Arc::clone(&hw), plan(&hw, &config)).unwrap();
+    controller.set_mode("case", Mode::Auto).unwrap();
+    controller.tick().unwrap();
+    assert_eq!(board(&hw, "pwm3_enable"), "2");
+
+    let mut changed = config.clone();
+    changed.fans[2].curve = Some(vec![(30.0, 100.0), (80.0, 100.0)]);
+    let new_plan = controller.resolve(&changed).unwrap();
+    assert!(config::same_outputs(controller.plan(), &new_plan));
+    controller.replace_plan(new_plan);
+    controller.tick().unwrap();
+
+    // Curve mode again, taken back over, heading for the new 100 % curve.
+    assert_eq!(board(&hw, "pwm3_enable"), "1");
+    let snapshot = controller.snapshot();
+    let case = snapshot.fans.iter().find(|f| f.id == "case").unwrap();
+    assert_eq!(case.mode, Mode::Curve);
 }

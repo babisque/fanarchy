@@ -13,6 +13,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
+pub use fanarchy_protocol::hardware::{Chip, Fan, PwmMode, PwmOutput, TempSensor, pwm_to_percent};
+
 use crate::safety::Duty;
 
 /// Default location of the hwmon class directory.
@@ -44,69 +46,6 @@ pub enum HwmonError {
         #[source]
         source: std::io::Error,
     },
-}
-
-/// One hwmon chip, identified by its `name` file.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Chip {
-    /// Contents of the chip's `name` file, e.g. `k10temp`.
-    pub name: String,
-    /// Directory the chip was read from. Valid for this boot only:
-    /// the `hwmonN` index changes between boots, so never persist it.
-    pub path: PathBuf,
-    pub temps: Vec<TempSensor>,
-    pub fans: Vec<Fan>,
-    pub pwms: Vec<PwmOutput>,
-}
-
-/// A `tempN_input` sensor.
-#[derive(Debug, Clone, PartialEq)]
-pub struct TempSensor {
-    pub index: u32,
-    pub label: Option<String>,
-    /// `None` when the file is missing, unreadable or out of range.
-    pub celsius: Option<f32>,
-}
-
-/// A `fanN_input` tachometer.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Fan {
-    pub index: u32,
-    pub label: Option<String>,
-    /// `None` when unavailable, `Some(0)` when the fan is stopped.
-    pub rpm: Option<u32>,
-}
-
-/// A `pwmN` output and its `pwmN_enable` mode.
-#[derive(Debug, Clone, PartialEq)]
-pub struct PwmOutput {
-    pub index: u32,
-    /// Raw duty cycle, 0–255. `None` when unavailable.
-    pub value: Option<u8>,
-    /// `None` when `pwmN_enable` is missing or unreadable.
-    pub mode: Option<PwmMode>,
-}
-
-/// Meaning of `pwmN_enable`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PwmMode {
-    /// `0`: no control, fan at full speed.
-    Disabled,
-    /// `1`: manual control through `pwmN`.
-    Manual,
-    /// `2` or higher: automatic (BIOS / chip) control. Keeps the raw value.
-    Automatic(u32),
-}
-
-impl PwmMode {
-    /// The raw value of `pwmN_enable` for this mode.
-    pub fn raw(self) -> u32 {
-        match self {
-            PwmMode::Disabled => 0,
-            PwmMode::Manual => 1,
-            PwmMode::Automatic(n) => n,
-        }
-    }
 }
 
 /// One `pwmN` output on a chip found during discovery.
@@ -473,13 +412,6 @@ pub fn parse_pwm_mode(raw: &str) -> Option<PwmMode> {
         1 => Some(PwmMode::Manual),
         n => Some(PwmMode::Automatic(n)),
     }
-}
-
-/// Convert a raw PWM value (0–255) to a rounded percentage (0–100).
-pub fn pwm_to_percent(value: u8) -> u8 {
-    let percent = (u32::from(value) * 100 + 127) / 255;
-    // Always <= 100, so the conversion cannot fail.
-    u8::try_from(percent).unwrap_or(100)
 }
 
 #[cfg(test)]

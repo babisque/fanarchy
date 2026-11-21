@@ -23,4 +23,5 @@ package() {
   install -Dm755 target/release/fanarchyd "$pkgdir/usr/bin/fanarchyd"
   install -Dm755 target/release/fanarchyctl "$pkgdir/usr/bin/fanarchyctl"
   install -Dm644 packaging/fanarchyd.service "$pkgdir/usr/lib/systemd/system/fanarchyd.service"
+  install -Dm644 packaging/fanarchy.sysusers "$pkgdir/usr/lib/sysusers.d/fanarchy.conf"
 }

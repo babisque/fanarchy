@@ -4,6 +4,8 @@
 //! written to `pwmN`) is through [`clamp`], so a PWM below the fan's
 //! minimum, or 0, can never reach the hardware.
 
+pub use fanarchy_protocol::Override;
+
 use crate::curve::percent_to_pwm;
 
 /// Lowest allowed `min_percent` in the config. Keeps every duty above 0.
@@ -26,19 +28,6 @@ impl Duty {
     pub fn percent(self) -> f32 {
         f32::from(self.0) * 100.0 / 255.0
     }
-}
-
-/// A safety condition that overrides the curve.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Override {
-    /// No override: the curve decides.
-    #[default]
-    None,
-    /// CPU above the critical limit: 100 %.
-    Critical,
-    /// The fan's sensor or the CPU sensor cannot be read:
-    /// `sensor_fail_percent`.
-    SensorFailed,
 }
 
 /// Decide which override applies to one fan.

@@ -7,6 +7,8 @@ use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::process::{Command, ExitStatus};
 
+pub use fanarchy_protocol::hardware::GpuTemp;
+
 use crate::hwmon::millidegrees_to_celsius;
 
 /// Default program name, looked up on `PATH`.
@@ -16,15 +18,6 @@ const QUERY_ARGS: [&str; 2] = [
     "--query-gpu=index,name,temperature.gpu",
     "--format=csv,noheader,nounits",
 ];
-
-/// Temperature of one GPU.
-#[derive(Debug, Clone, PartialEq)]
-pub struct GpuTemp {
-    pub index: u32,
-    pub name: String,
-    /// `None` when the driver reports `[N/A]` or an out-of-range value.
-    pub celsius: Option<f32>,
-}
 
 #[derive(Debug, thiserror::Error)]
 pub enum GpuError {
