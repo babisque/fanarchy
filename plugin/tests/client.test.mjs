@@ -257,3 +257,11 @@ test("blank, unreadable and unexpected replies", () => {
   assert.equal(stray.request, null);
   assert.match(stray.log, /no request/);
 });
+
+test("panel toggle prefers the shell facade over the CLI", () => {
+  assert.equal(Client.panelToggleRoute({ toggle() {}, hide() {} }), "api");
+  assert.equal(Client.panelToggleRoute({ hide() {} }), "command");
+  assert.equal(Client.panelToggleRoute(null), "command");
+  assert.equal(Client.panelToggleRoute(undefined), "command");
+  assert.equal(Client.togglePanelCommand(), "omarchy-shell shell toggle io.github.babisque.fanarchy");
+});

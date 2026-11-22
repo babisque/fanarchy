@@ -22,7 +22,11 @@ Ui.BarWidget {
 
   function togglePanel() {
     tooltip.open = false
-    if (root.bar) root.bar.run(Client.togglePanelCommand())
+    if (!root.bar) return
+    // Omarchy's own panel API, in-process; the CLI only as a fallback.
+    var shellApi = root.bar.shell
+    if (Client.panelToggleRoute(shellApi) === "api") shellApi.toggle(Client.PLUGIN_ID, "")
+    else root.bar.run(Client.togglePanelCommand())
   }
 
   // The bar only routes clicks to registered targets, as WidgetButton does.

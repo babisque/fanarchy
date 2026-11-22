@@ -124,6 +124,23 @@ test("a widget click right after an outside click does not reopen", () => {
   assert.equal(Panel.ignoreReopen(null, 1200), false);
 });
 
+test("the reopen guard swallows at most one open", () => {
+  const first = plain(Panel.reopenGuard(1000, 1200));
+  assert.deepEqual(first, { ignore: true, nextLastDismissMs: -1 });
+  const second = plain(Panel.reopenGuard(first.nextLastDismissMs, 1250));
+  assert.deepEqual(second, { ignore: false, nextLastDismissMs: -1 });
+  assert.equal(Panel.reopenGuard(1000, 5000).ignore, false);
+  assert.equal(Panel.reopenGuard(-1, 5000).ignore, false);
+});
+
+test("windowLost: open state follows the window", () => {
+  assert.equal(Panel.windowLost(true, false), true);
+  assert.equal(Panel.windowLost(true, undefined), true);
+  assert.equal(Panel.windowLost(true, true), false);
+  assert.equal(Panel.windowLost(false, false), false);
+  assert.equal(Panel.windowLost(false, true), false);
+});
+
 test("empty state copy", () => {
   assert.equal(Panel.emptyState("down", "stopped").command, "sudo systemctl start fanarchyd");
   assert.equal(Panel.emptyState("down", "stopped").headline, "THE DAEMON STOPPED LISTENING.");

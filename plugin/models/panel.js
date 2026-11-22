@@ -149,6 +149,19 @@ function ignoreReopen(lastDismissMs, nowMs) {
   return isNumber(lastDismissMs) && nowMs - lastDismissMs >= 0 && nowMs - lastDismissMs < REOPEN_GUARD_MS
 }
 
+// One-shot version for open(): a dismissal can swallow at most the one
+// reopen that belongs to the same click. `nextLastDismissMs` is always -1
+// so the guard never blocks a later open.
+function reopenGuard(lastDismissMs, nowMs) {
+  return { ignore: ignoreReopen(lastDismissMs, nowMs), nextLastDismissMs: -1 }
+}
+
+// The panel thinks it is open but its window is gone (closed by the
+// compositor, screen removed): the open state must follow the window.
+function windowLost(opened, windowVisible) {
+  return opened === true && windowVisible !== true
+}
+
 // Copy for EmptyState.qml.
 function emptyState(kind, downReason) {
   if (kind === "empty") {

@@ -22,6 +22,13 @@ function togglePanelCommand() {
   return "omarchy-shell shell toggle " + PLUGIN_ID
 }
 
+// How the bar widget toggles the panel: "api" through the shell facade
+// Omarchy hands the bar (bar.shell.toggle, in-process), "command" through
+// the omarchy-shell CLI when that facade is missing.
+function panelToggleRoute(shellApi) {
+  return shellApi && typeof shellApi.toggle === "function" ? "api" : "command"
+}
+
 function initialState() {
   return { connected: false, status: null, error: null }
 }
