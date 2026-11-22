@@ -240,3 +240,22 @@ function pickScreen(screens, wanted, focusedName) {
   }
   return null
 }
+
+// Ask for the config again when it is missing, the request socket is up
+// and no get_config is already waiting for its reply.
+function needsConfig(config, connected, pending) {
+  if (config || connected !== true) return false
+  var list = Array.isArray(pending) ? pending : []
+  for (var i = 0; i < list.length; i++) if (list[i] && list[i].cmd === "get_config") return false
+  return true
+}
+
+// One line per fan for the debug log: "case=[[40,25],[65,45],[80,100]]".
+function curvesSummary(config) {
+  var fans = config && Array.isArray(config.fans) ? config.fans : []
+  var parts = []
+  for (var i = 0; i < fans.length; i++) {
+    if (fans[i] && fans[i].role === "fan") parts.push(fans[i].id + "=" + JSON.stringify(fans[i].curve || null))
+  }
+  return parts.length > 0 ? parts.join(" ") : "(no controlled fans)"
+}

@@ -195,3 +195,21 @@ test("pickScreen: requested, then focused, then null", () => {
   assert.equal(Panel.pickScreen(screens, "gone", "also-gone"), null);
   assert.equal(Panel.pickScreen(null, "DP-1", ""), null);
 });
+
+test("needsConfig: only when missing, connected and not already asked", () => {
+  assert.equal(Panel.needsConfig(null, true, []), true);
+  assert.equal(Panel.needsConfig(null, true, [{ cmd: "set_mode" }]), true);
+  assert.equal(Panel.needsConfig(null, true, [{ cmd: "get_config" }]), false);
+  assert.equal(Panel.needsConfig(null, false, []), false);
+  assert.equal(Panel.needsConfig({ fans: [] }, true, []), false);
+});
+
+test("curvesSummary lists each controlled fan's curve", () => {
+  const config = { fans: [
+    { id: "radiator", role: "fan", curve: [[40, 30], [85, 100]] },
+    { id: "pump", role: "pump" },
+    { id: "case", role: "fan", curve: [[40, 25], [80, 100]] },
+  ] };
+  assert.equal(Panel.curvesSummary(config), "radiator=[[40,30],[85,100]] case=[[40,25],[80,100]]");
+  assert.equal(Panel.curvesSummary(null), "(no controlled fans)");
+});

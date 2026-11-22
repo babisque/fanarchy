@@ -149,6 +149,7 @@ Item {
 
   function handleReply(request, ok, data, error) {
     if (request.cmd === "get_config") {
+      root.dbg("get_config reply ok=" + ok + (ok ? " curves: " + Panel.curvesSummary(data) : " error=" + error))
       if (ok) {
         root.config = data
         root.resetDraft()
@@ -178,12 +179,28 @@ Item {
     }
   }
 
+  // The config is only asked for once per connection; if that reply never
+  // made it, ask again instead of leaving the editor empty.
+  function ensureConfig(reason) {
+    if (!Panel.needsConfig(root.config, commands.connected, commands.pending)) return
+    root.dbg("config missing (" + reason + "), asking again")
+    commands.send(Client.getConfigRequest())
+  }
+
   onStatusChanged: {
     root.selectedId = Panel.pickSelection(root.status, root.selectedId)
     if (Panel.pendingSettled(root.selectedFan, root.pendingMode)) root.pendingMode = null
+    if (root.status) root.ensureConfig("status arrived")
   }
-  onSelectedIdChanged: root.resetDraft()
-  onSavedCurveChanged: root.resetDraft()
+  onSelectedIdChanged: {
+    root.dbg("selected " + root.selectedId)
+    root.resetDraft()
+  }
+  onSavedCurveChanged: {
+    root.dbg("curve for " + root.selectedId + ": " + JSON.stringify(root.savedCurve)
+      + " (config " + (root.config ? "loaded" : "missing") + ", inFlight=" + root.curveInFlight + ")")
+    root.resetDraft()
+  }
   onOpenedChanged: {
     root.dbg("opened flag=" + root.opened)
     if (!opened) root.pendingMode = null
@@ -205,6 +222,7 @@ Item {
   FanarchyCommands {
     id: commands
     active: root.opened
+    debugScreen: root.screenName
     onReady: commands.send(Client.getConfigRequest())
     onReplied: function(request, ok, data, error) { root.handleReply(request, ok, data, error) }
   }
