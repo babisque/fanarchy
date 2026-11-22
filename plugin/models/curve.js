@@ -17,9 +17,20 @@ function clamp(value, low, high) {
   return Math.min(Math.max(value, low), high)
 }
 
+// A real array from `value`, or null when it is not a list. Lists that
+// crossed a QML `var` boundary arrive as Qt sequence objects, which
+// Array.isArray() rejects even though they index and have a length.
+function listOf(value) {
+  if (Array.isArray(value)) return value
+  if (!value || typeof value !== "object" || typeof value.length !== "number") return null
+  var out = []
+  for (var i = 0; i < value.length; i++) out.push(value[i])
+  return out
+}
+
 function copy(points) {
   var out = []
-  var list = Array.isArray(points) ? points : []
+  var list = listOf(points) || []
   for (var i = 0; i < list.length; i++) out.push([Number(list[i][0]), Number(list[i][1])])
   return out
 }
@@ -29,7 +40,9 @@ function sorted(points) {
 }
 
 function equal(a, b) {
-  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false
+  a = listOf(a)
+  b = listOf(b)
+  if (!a || !b || a.length !== b.length) return false
   for (var i = 0; i < a.length; i++) {
     if (Number(a[i][0]) !== Number(b[i][0]) || Number(a[i][1]) !== Number(b[i][1])) return false
   }
@@ -85,15 +98,32 @@ function addPointAt(points, tempC, minPercent) {
   if (list.length >= MAX_POINTS) return list
   var t = Math.round(clamp(Number(tempC), CHART_MIN_C, CHART_MAX_C))
   for (var i = 0; i < list.length; i++) if (list[i][0] === t) return list
-  var p = Math.round(Math.max(evaluate(list, t), floorOf(minPercent)))
+  // An empty curve has nothing to evaluate: start from the fan's minimum.
+  var p = list.length === 0 ? starterPercent(minPercent) : Math.round(Math.max(evaluate(list, t), floorOf(minPercent)))
   list.push([t, Math.min(p, 100)])
-  return sorted(list)
+  // One point is not a curve yet: complete it so the daemon accepts it.
+  return list.length < MIN_POINTS ? addPoint(list, minPercent) : sorted(list)
+}
+
+// Lowest point of a curve started from scratch: the fan's minimum, and at
+// least 30 % so a new curve never starts near stall.
+function starterPercent(minPercent) {
+  return Math.round(Math.min(100, Math.max(floorOf(minPercent), 30)))
 }
 
 // Add a point in the middle of the widest gap between two points.
+// An empty curve gets a 2-point starter (40 °C at the minimum, 80 °C at
+// 100 %), a single point gets a partner, so the result is always valid.
 function addPoint(points, minPercent) {
   var list = sorted(points)
-  if (list.length < 2) return addPointAt(list, (CHART_MIN_C + CHART_MAX_C) / 2, minPercent)
+  if (list.length === 0) return [[40, starterPercent(minPercent)], [80, 100]]
+  if (list.length === 1) {
+    var only = list[0]
+    // Partner at 80 °C / 100 % above it, or at 40 °C below it.
+    if (only[0] < 80) list.push([80, 100])
+    else list.push([40, Math.min(only[1], starterPercent(minPercent))])
+    return sorted(list)
+  }
   var best = -1, width = 1
   for (var i = 1; i < list.length; i++) {
     var gap = list[i][0] - list[i - 1][0]
@@ -111,16 +141,19 @@ function removePoint(points, index) {
 }
 
 function canAdd(points) {
-  return Array.isArray(points) && points.length < MAX_POINTS
+  var list = listOf(points)
+  return !!list && list.length < MAX_POINTS
 }
 
 function canRemove(points) {
-  return Array.isArray(points) && points.length > MIN_POINTS
+  var list = listOf(points)
+  return !!list && list.length > MIN_POINTS
 }
 
 // Null when the curve is valid, otherwise what is wrong with it.
 function validate(points, minPercent) {
-  if (!Array.isArray(points) || points.length < MIN_POINTS) return "a curve needs at least 2 points"
+  points = listOf(points)
+  if (!points || points.length < MIN_POINTS) return "a curve needs at least 2 points"
   if (points.length > MAX_POINTS) return "a curve has at most 8 points"
   var floor = floorOf(minPercent)
   for (var i = 0; i < points.length; i++) {

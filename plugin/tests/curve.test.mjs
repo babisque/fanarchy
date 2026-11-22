@@ -109,3 +109,36 @@ test("labels and ticks", () => {
   assert.deepEqual(plain(Curve.tempTicks()), [20, 30, 40, 50, 60, 70, 80, 90, 100]);
   assert.deepEqual(plain(Curve.percentTicks()), [0, 25, 50, 75, 100]);
 });
+
+test("+ POINT on an empty curve makes a valid 2-point starter", () => {
+  const starter = Curve.addPoint([], 20);
+  assert.deepEqual(JSON.parse(JSON.stringify(starter)), [[40, 30], [80, 100]]);
+  assert.equal(Curve.validate(starter, 20), null);
+  // Never below the fan's minimum.
+  assert.deepEqual(JSON.parse(JSON.stringify(Curve.addPoint([], 45))), [[40, 45], [80, 100]]);
+  assert.equal(Curve.validate(Curve.addPoint([], 45), 45), null);
+  assert.equal(Curve.canAdd([]), true);
+});
+
+test("+ POINT on a single point gives it a partner", () => {
+  const low = Curve.addPoint([[50, 40]], 20);
+  assert.deepEqual(JSON.parse(JSON.stringify(low)), [[50, 40], [80, 100]]);
+  assert.equal(Curve.validate(low, 20), null);
+  const high = Curve.addPoint([[90, 100]], 20);
+  assert.deepEqual(JSON.parse(JSON.stringify(high)), [[40, 30], [90, 100]]);
+  assert.equal(Curve.validate(high, 20), null);
+});
+
+test("double-click on an empty chart also yields a valid curve", () => {
+  const curve = Curve.addPointAt([], 55, 20);
+  assert.equal(curve.length >= 2, true);
+  assert.equal(Curve.validate(curve, 20), null);
+});
+
+test("listOf accepts Qt sequence objects", () => {
+  const sequence = { length: 2, 0: [40, 30], 1: [80, 100] };
+  assert.deepEqual(JSON.parse(JSON.stringify(Curve.listOf(sequence))), [[40, 30], [80, 100]]);
+  assert.equal(Curve.listOf(null), null);
+  assert.equal(Curve.listOf("abc"), null);
+  assert.equal(Curve.validate(sequence, 20), null);
+});

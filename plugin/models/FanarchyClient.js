@@ -189,6 +189,23 @@ function setModeRequest(fanId, mode, percent) {
   return request
 }
 
+// Replies cross from FanarchyCommands to the panel as JSON text: a `var`
+// signal argument goes through QVariant and its arrays come out as Qt
+// sequences, which Array.isArray() rejects. Text comes out as plain JS.
+function encodeReply(request, data) {
+  return {
+    requestJson: JSON.stringify(request === undefined ? null : request),
+    dataJson: JSON.stringify(data === undefined ? null : data)
+  }
+}
+
+function decodeReply(requestJson, dataJson) {
+  function parse(text) {
+    try { return JSON.parse(String(text || "null")) } catch (e) { return null }
+  }
+  return { request: parse(requestJson), data: parse(dataJson) }
+}
+
 function enqueue(queue, request) {
   return (queue || []).concat([request])
 }

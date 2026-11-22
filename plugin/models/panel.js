@@ -1,5 +1,6 @@
 .pragma library
 .import "format.js" as Format
+.import "curve.js" as Curve
 
 // What the panel shows, derived from the daemon's status and config.
 // Pure functions only; Panel.qml and its components just draw the result.
@@ -18,7 +19,7 @@ function isNumber(value) {
 }
 
 function controlledFans(status) {
-  var fans = status && Array.isArray(status.fans) ? status.fans : []
+  var fans = status && Curve.listOf(status.fans) || []
   return fans.filter(function(fan) { return fan && fan.role === "fan" })
 }
 
@@ -31,14 +32,14 @@ function panelState(connected, status) {
 }
 
 function configFan(config, id) {
-  var fans = config && Array.isArray(config.fans) ? config.fans : []
+  var fans = config ? Curve.listOf(config.fans) || [] : []
   for (var i = 0; i < fans.length; i++) if (fans[i] && fans[i].id === id) return fans[i]
   return null
 }
 
 function curveOf(config, id) {
   var fan = configFan(config, id)
-  return fan && Array.isArray(fan.curve) ? fan.curve : []
+  return fan ? Curve.copy(fan.curve) : []   // plain [[temp_c, percent], ...]
 }
 
 // "fan1 · pwm1 · cpu/temp1" (the fanN header and pwmN share the number).
@@ -77,7 +78,7 @@ function fanCard(fan, config) {
 }
 
 function fanCards(status, config) {
-  var fans = status && Array.isArray(status.fans) ? status.fans : []
+  var fans = status && Curve.listOf(status.fans) || []
   var out = []
   for (var i = 0; i < fans.length; i++) if (fans[i]) out.push(fanCard(fans[i], config))
   return out
@@ -101,13 +102,13 @@ function pickSelection(status, currentId) {
 }
 
 function statusFan(status, id) {
-  var fans = status && Array.isArray(status.fans) ? status.fans : []
+  var fans = status && Curve.listOf(status.fans) || []
   for (var i = 0; i < fans.length; i++) if (fans[i] && fans[i].id === id) return fans[i]
   return null
 }
 
 function headerTemps(status) {
-  var gpus = status && Array.isArray(status.gpus) ? status.gpus : []
+  var gpus = status && Curve.listOf(status.gpus) || []
   return {
     cpu: Format.temperature(status ? status.cpu_temp_c : null),
     gpu: Format.temperature(gpus.length > 0 && gpus[0] ? gpus[0].celsius : null)
@@ -206,7 +207,7 @@ function pendingSettled(fan, pending) {
 
 // Config copy with one fan's curve replaced (after set_curve succeeds).
 function withCurve(config, fanId, points) {
-  if (!config || !Array.isArray(config.fans)) return config
+  if (!config || !Curve.listOf(config.fans)) return config
   var next = JSON.parse(JSON.stringify(config))
   for (var i = 0; i < next.fans.length; i++) {
     if (next.fans[i] && next.fans[i].id === fanId) next.fans[i].curve = JSON.parse(JSON.stringify(points))
@@ -245,17 +246,17 @@ function pickScreen(screens, wanted, focusedName) {
 // and no get_config is already waiting for its reply.
 function needsConfig(config, connected, pending) {
   if (config || connected !== true) return false
-  var list = Array.isArray(pending) ? pending : []
+  var list = Curve.listOf(pending) || []
   for (var i = 0; i < list.length; i++) if (list[i] && list[i].cmd === "get_config") return false
   return true
 }
 
 // One line per fan for the debug log: "case=[[40,25],[65,45],[80,100]]".
 function curvesSummary(config) {
-  var fans = config && Array.isArray(config.fans) ? config.fans : []
+  var fans = config ? Curve.listOf(config.fans) || [] : []
   var parts = []
   for (var i = 0; i < fans.length; i++) {
-    if (fans[i] && fans[i].role === "fan") parts.push(fans[i].id + "=" + JSON.stringify(fans[i].curve || null))
+    if (fans[i] && fans[i].role === "fan") parts.push(fans[i].id + "=" + JSON.stringify(Curve.listOf(fans[i].curve) ? Curve.copy(fans[i].curve) : null))
   }
   return parts.length > 0 ? parts.join(" ") : "(no controlled fans)"
 }

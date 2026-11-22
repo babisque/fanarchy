@@ -107,6 +107,8 @@ Item {
 
   function applyCurve(points) {
     if (!root.selectedFan) return
+    // Arrived through a `var` signal: make it a plain array again.
+    points = Curve.copy(points)
     var problem = Curve.validate(points, Panel.minPercent(root.selectedFan))
     if (problem) {
       root.showError(problem)
@@ -224,7 +226,10 @@ Item {
     active: root.opened
     debugScreen: root.screenName
     onReady: commands.send(Client.getConfigRequest())
-    onReplied: function(request, ok, data, error) { root.handleReply(request, ok, data, error) }
+    onReplied: function(requestJson, ok, dataJson, error) {
+      var reply = Client.decodeReply(requestJson, dataJson)
+      if (reply.request) root.handleReply(reply.request, ok, reply.data, error)
+    }
   }
 
   Fonts {

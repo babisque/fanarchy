@@ -15,7 +15,14 @@ Item {
 
   // Emitted once per request: `ok`, the reply's `data` or the daemon's
   // `error` message, shown to the user as is.
-  signal replied(var request, bool ok, var data, string error)
+  // Request and data travel as JSON text (Client.encodeReply): a `var`
+  // argument would turn their arrays into Qt sequences on the way.
+  signal replied(string requestJson, bool ok, string dataJson, string error)
+
+  function reply(request, ok, data, error) {
+    var encoded = Client.encodeReply(request, data)
+    root.replied(encoded.requestJson, ok, encoded.dataJson, error || "")
+  }
   signal ready()
 
   visible: false
@@ -28,7 +35,7 @@ Item {
   function send(request) {
     root.dbg("send " + request.cmd + " (connected=" + socket.connected + ", pending=" + root.pending.length + ")")
     if (!socket.connected) {
-      root.replied(request, false, null, "the daemon is not reachable")
+      root.reply(request, false, null, "the daemon is not reachable")
       return
     }
     root.pending = Client.enqueue(root.pending, request)
@@ -39,7 +46,7 @@ Item {
   function failPending(reason) {
     var dropped = root.pending
     root.pending = []
-    for (var i = 0; i < dropped.length; i++) root.replied(dropped[i], false, null, reason)
+    for (var i = 0; i < dropped.length; i++) root.reply(dropped[i], false, null, reason)
   }
 
   function connect() {
@@ -68,7 +75,7 @@ Item {
           + " pending left=" + result.queue.length)
         root.pending = result.queue
         if (result.log) console.warn(result.log)
-        if (result.request) root.replied(result.request, result.ok, result.data, result.error || "")
+        if (result.request) root.reply(result.request, result.ok, result.data, result.error)
       }
     }
 
