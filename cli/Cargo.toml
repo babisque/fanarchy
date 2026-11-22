@@ -10,7 +10,12 @@ repository.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 fanarchy-protocol.workspace = true
+fanarchyd = { path = "../daemon" }
 serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

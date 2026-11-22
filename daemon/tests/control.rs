@@ -146,6 +146,37 @@ fn never_touches_pump_or_unlisted_outputs() {
     assert_untouched(&hw, &original);
 }
 
+/// The config `fanarchyctl init` writes: chips and safety, no outputs.
+#[tokio::test(start_paused = true)]
+async fn config_without_fans_runs_and_writes_nothing() {
+    let hw = hardware();
+    let mut config = example_config();
+    config.fans.clear();
+    assert!(plan(&hw, &config).fans.is_empty());
+
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let task = tokio::spawn({
+        let hw = Arc::clone(&hw);
+        let config = config.clone();
+        async move {
+            let shutdown = async {
+                let _ = stopped.await;
+            };
+            control::run(hw, &config, PanicHook::Skip, shutdown).await
+        }
+    });
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    stop.send(()).unwrap();
+    task.await.unwrap().unwrap();
+    control::restore_from_config(hw.as_ref(), &config).unwrap();
+
+    assert!(
+        hw.writes().is_empty(),
+        "unexpected writes: {:?}",
+        hw.writes()
+    );
+}
+
 #[test]
 fn writes_only_when_duty_changes() {
     let hw = hardware();

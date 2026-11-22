@@ -156,7 +156,10 @@ dependencies = [
  "anyhow",
  "clap",
  "fanarchy-protocol",
+ "fanarchyd",
  "serde_json",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]

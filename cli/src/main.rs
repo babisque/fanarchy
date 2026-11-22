@@ -15,6 +15,8 @@ use fanarchy_protocol::table::{render_fans, render_status};
 use fanarchy_protocol::{CurvePoint, FanMode, Request, Response, SOCKET_PATH, Status};
 use serde_json::Value;
 
+mod init;
+
 /// How long to wait for the daemon to answer.
 const TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -53,6 +55,19 @@ enum Command {
     },
     /// Re-read the config file.
     Reload,
+    /// Detect the hardware and write a starter config that controls
+    /// nothing yet (needs sudo for the default path).
+    Init {
+        /// Where to write the config.
+        #[arg(long, default_value = fanarchyd::config::CONFIG_PATH)]
+        output: PathBuf,
+        /// Replace an existing config.
+        #[arg(long)]
+        force: bool,
+        /// Print the config instead of writing it.
+        #[arg(long, conflicts_with_all = ["output", "force"])]
+        stdout: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -125,6 +140,11 @@ fn run(cli: &Cli) -> Result<()> {
                 None => println!("fan '{fan}': mode {}", mode.as_str()),
             }
         }
+        Command::Init {
+            output,
+            force,
+            stdout,
+        } => init::run(output, *force, *stdout)?,
         Command::Reload => {
             request(&cli.socket, &Request::Reload)?;
             println!("config reloaded");
