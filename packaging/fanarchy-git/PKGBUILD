@@ -2,7 +2,7 @@
 
 pkgname=fanarchy-git
 _pkgname=fanarchy
-pkgver=0.1.0
+pkgver=1.0.0
 pkgrel=1
 pkgdesc="Fan control for Omarchy: hwmon fan curve daemon and CLI (development version)"
 arch=('x86_64')
