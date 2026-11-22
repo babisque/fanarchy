@@ -1,0 +1,56 @@
+# Maintainer: babisque <https://github.com/babisque>
+
+pkgname=fanarchy-git
+_pkgname=fanarchy
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Fan control for Omarchy: hwmon fan curve daemon and CLI (development version)"
+arch=('x86_64')
+url="https://github.com/babisque/fanarchy"
+license=('MIT')
+depends=('gcc-libs' 'glibc')
+makedepends=('cargo' 'git')
+optdepends=('nvidia-utils: GPU temperatures in the status'
+            'lm_sensors: the sensors command, to find your fans and pump')
+provides=("$_pkgname")
+conflicts=("$_pkgname")
+install=fanarchy.install
+source=("$_pkgname::git+$url.git")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd "$_pkgname"
+  git describe --long --tags --abbrev=7 2>/dev/null | sed 's/^v//;s/\([^-]*-g\)/r\1/;s/-/./g' ||
+    printf "0.r%s.g%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
+}
+
+prepare() {
+  cd "$_pkgname"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "$_pkgname"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release
+}
+
+check() {
+  cd "$_pkgname"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo test --frozen
+}
+
+package() {
+  cd "$_pkgname"
+  install -Dm755 target/release/fanarchyd "$pkgdir/usr/bin/fanarchyd"
+  install -Dm755 target/release/fanarchyctl "$pkgdir/usr/bin/fanarchyctl"
+  install -Dm644 packaging/fanarchyd.service "$pkgdir/usr/lib/systemd/system/fanarchyd.service"
+  install -Dm644 packaging/fanarchy.sysusers "$pkgdir/usr/lib/sysusers.d/fanarchy.conf"
+  install -dm755 "$pkgdir/etc/fanarchy"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$_pkgname/README.md"
+  install -Dm644 examples/config.example.json "$pkgdir/usr/share/doc/$_pkgname/examples/config.example.json"
+}

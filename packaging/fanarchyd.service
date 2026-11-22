@@ -2,6 +2,9 @@
 Description=Fanarchy fan control daemon
 Documentation=https://github.com/babisque/fanarchy
 After=systemd-modules-load.service
+# Written by `sudo fanarchyctl init`. Without it the unit is skipped
+# instead of failing and restarting in a loop.
+ConditionPathExists=/etc/fanarchy/config.json
 
 [Service]
 Type=simple
@@ -12,12 +15,25 @@ ExecStopPost=/usr/bin/fanarchyd restore
 Restart=on-failure
 RestartSec=2
 
-# Hardening
+# Hardening. Writes are limited to the hwmon tree (pwmN / pwmN_enable of
+# the configured fans), the config directory and the socket in /run.
+# ProtectKernelTunables is left off on purpose: it makes /sys read-only.
+# PrivateDevices is left off so nvidia-smi can reach /dev/nvidia*.
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
 NoNewPrivileges=yes
 ReadWritePaths=/sys/class/hwmon /etc/fanarchy /run
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
 
 [Install]
 WantedBy=multi-user.target

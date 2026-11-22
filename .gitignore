@@ -22,3 +22,7 @@
 
 # Claude Code local settings
 .claude/settings.local.json
+/packaging/fanarchy-git/src/
+/packaging/fanarchy-git/pkg/
+/packaging/fanarchy-git/fanarchy/
+/packaging/fanarchy-git/*.pkg.tar.*

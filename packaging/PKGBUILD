@@ -1,21 +1,38 @@
-# Maintainer: babisque
-# Skeleton only. Finished and checked with namcap in Phase 6.
+# Maintainer: babisque <https://github.com/babisque>
 
 pkgname=fanarchy
 pkgver=0.1.0
 pkgrel=1
-pkgdesc="Fan control for Omarchy: hwmon fan curves daemon and CLI"
+pkgdesc="Fan control for Omarchy: hwmon fan curve daemon and CLI"
 arch=('x86_64')
 url="https://github.com/babisque/fanarchy"
 license=('MIT')
-depends=('gcc-libs')
+depends=('gcc-libs' 'glibc')
 makedepends=('cargo')
+optdepends=('nvidia-utils: GPU temperatures in the status'
+            'lm_sensors: the sensors command, to find your fans and pump')
+install=fanarchy.install
 source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
+# Filled in from the release tarball when the version is tagged.
 sha256sums=('SKIP')
+
+prepare() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
 
 build() {
   cd "$pkgname-$pkgver"
-  cargo build --release --locked
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release
+}
+
+check() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo test --frozen
 }
 
 package() {
@@ -24,4 +41,10 @@ package() {
   install -Dm755 target/release/fanarchyctl "$pkgdir/usr/bin/fanarchyctl"
   install -Dm644 packaging/fanarchyd.service "$pkgdir/usr/lib/systemd/system/fanarchyd.service"
   install -Dm644 packaging/fanarchy.sysusers "$pkgdir/usr/lib/sysusers.d/fanarchy.conf"
+  # Empty: the service's ReadWritePaths needs it. The config itself is
+  # written by `fanarchyctl init`, never shipped.
+  install -dm755 "$pkgdir/etc/fanarchy"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+  install -Dm644 examples/config.example.json "$pkgdir/usr/share/doc/$pkgname/examples/config.example.json"
 }
