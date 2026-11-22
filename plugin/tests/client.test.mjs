@@ -265,3 +265,9 @@ test("panel toggle prefers the shell facade over the CLI", () => {
   assert.equal(Client.panelToggleRoute(undefined), "command");
   assert.equal(Client.togglePanelCommand(), "omarchy-shell shell toggle io.github.babisque.fanarchy");
 });
+
+test("panel payload names the clicked monitor", () => {
+  assert.equal(Client.panelPayload("DP-1"), '{"screen":"DP-1"}');
+  assert.equal(Client.panelPayload(""), "");
+  assert.equal(Client.panelPayload(null), "");
+});

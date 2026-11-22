@@ -27,3 +27,9 @@ function clampToWindow(barPosition, point, popup, windowSize, margin) {
   var maxY = Math.max(margin, windowSize.height - popup.height - margin)
   return { x: Math.round(point.x), y: Math.round(Math.min(Math.max(point.y, margin), maxY)) }
 }
+
+// The hover card shows while the pointer is over the button, except after a
+// click: it stays hidden until the pointer leaves and comes back.
+function tooltipOpen(hovered, suppressed) {
+  return hovered === true && suppressed !== true
+}

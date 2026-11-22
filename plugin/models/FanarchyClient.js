@@ -29,6 +29,12 @@ function panelToggleRoute(shellApi) {
   return shellApi && typeof shellApi.toggle === "function" ? "api" : "command"
 }
 
+// Payload for shell.toggle(): the monitor whose widget was clicked, so the
+// panel opens on that screen.
+function panelPayload(screenName) {
+  return screenName ? JSON.stringify({ screen: String(screenName) }) : ""
+}
+
 function initialState() {
   return { connected: false, status: null, error: null }
 }

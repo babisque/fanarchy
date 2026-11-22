@@ -217,3 +217,26 @@ function withCurve(config, fanId, points) {
 function footerText(connected) {
   return (connected ? "daemon online" : "daemon offline") + " · /run/fanarchy.sock"
 }
+
+// Monitor name from the open() payload ({"screen": "DP-1"}), or "".
+function screenFromPayload(payloadJson) {
+  if (!payloadJson) return ""
+  try {
+    var data = JSON.parse(payloadJson)
+    return data && typeof data.screen === "string" ? data.screen : ""
+  } catch (e) {
+    return ""
+  }
+}
+
+// The screen object to put the panel on: the one named `wanted`, else the
+// focused monitor, else null (the compositor picks).
+function pickScreen(screens, wanted, focusedName) {
+  var list = screens || []
+  var names = [wanted, focusedName]
+  for (var n = 0; n < names.length; n++) {
+    if (!names[n]) continue
+    for (var i = 0; i < list.length; i++) if (list[i] && list[i].name === names[n]) return list[i]
+  }
+  return null
+}

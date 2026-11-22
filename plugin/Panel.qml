@@ -30,6 +30,7 @@ Item {
   property string confirmText: ""
   property string errorText: ""
   property real lastDismissMs: -1
+  property string screenName: ""          // monitor whose widget opened the panel
 
   readonly property var clientState: live.clientState
   readonly property var status: clientState.status
@@ -49,18 +50,20 @@ Item {
     root.lastDismissMs = guard.nextLastDismissMs
     if (guard.ignore) {
       // The click that dismissed the panel also reached the widget.
-      console.log("[fanarchy] panel open ignored (same click as the dismiss)")
+      console.warn("[fanarchy] panel open ignored (same click as the dismiss)")
       Qt.callLater(root.hideFromShell)
       return
     }
     if (root.opened) return
-    console.log("[fanarchy] panel open")
+    var focused = Hyprland.focusedMonitor ? Hyprland.focusedMonitor.name : ""
+    root.screenName = Panel.screenFromPayload(payloadJson) || focused
+    console.warn("[fanarchy] panel open on " + (root.screenName || "default screen"))
     root.opened = true
   }
 
   function close() {
     if (!root.opened) return
-    console.log("[fanarchy] panel close")
+    console.warn("[fanarchy] panel close")
     root.opened = false
     root.errorText = ""
     root.confirmText = ""
@@ -81,7 +84,7 @@ Item {
   // Every close the user triggers from inside the panel.
   function dismiss(reason) {
     if (!root.opened) return
-    console.log("[fanarchy] panel dismiss (" + reason + ")")
+    console.warn("[fanarchy] panel dismiss (" + reason + ")")
     root.lastDismissMs = Date.now()
     root.hideFromShell()
   }
@@ -207,6 +210,7 @@ Item {
     PanelWindow {
       id: window
 
+      screen: Panel.pickScreen(Quickshell.screens, root.screenName, "")
       anchors { top: true; right: true; bottom: true }
       implicitWidth: Theme.panel.width
       color: "transparent"

@@ -178,3 +178,20 @@ test("footer names the socket", () => {
   assert.equal(Panel.footerText(true), "daemon online · /run/fanarchy.sock");
   assert.equal(Panel.footerText(false), "daemon offline · /run/fanarchy.sock");
 });
+
+test("screen comes from the open() payload", () => {
+  assert.equal(Panel.screenFromPayload('{"screen":"DP-1"}'), "DP-1");
+  assert.equal(Panel.screenFromPayload(""), "");
+  assert.equal(Panel.screenFromPayload("{}"), "");
+  assert.equal(Panel.screenFromPayload("not json"), "");
+  assert.equal(Panel.screenFromPayload('{"screen":3}'), "");
+});
+
+test("pickScreen: requested, then focused, then null", () => {
+  const screens = [{ name: "DP-1" }, { name: "HDMI-A-1" }];
+  assert.equal(Panel.pickScreen(screens, "HDMI-A-1", "DP-1").name, "HDMI-A-1");
+  assert.equal(Panel.pickScreen(screens, "", "DP-1").name, "DP-1");
+  assert.equal(Panel.pickScreen(screens, "gone", "HDMI-A-1").name, "HDMI-A-1");
+  assert.equal(Panel.pickScreen(screens, "gone", "also-gone"), null);
+  assert.equal(Panel.pickScreen(null, "DP-1", ""), null);
+});

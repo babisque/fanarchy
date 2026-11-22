@@ -1,8 +1,10 @@
 import QtQuick
 import QtQuick.Shapes
+import Quickshell
 import qs.Ui as Ui
 import "models/theme.js" as Theme
 import "models/FanarchyClient.js" as Client
+import "models/placement.js" as Placement
 import "components"
 
 // Fanarchy bar widget: the mark plus the CPU temperature. Three looks:
@@ -16,16 +18,29 @@ Ui.BarWidget {
   readonly property bool hot: view.state === "hot"
   readonly property bool down: view.state === "down"
   property var registeredBar: null
+  // Hidden after a click until the pointer leaves the button.
+  property bool tooltipSuppressed: false
+  readonly property bool hovered: hover.hovered
+  readonly property string screenName: root.QsWindow.window && root.QsWindow.window.screen
+    ? root.QsWindow.window.screen.name : ""
+
+  onHoveredChanged: if (!hovered) root.tooltipSuppressed = false
 
   implicitWidth: vertical ? Math.max(barSize, button.width) : button.width
   implicitHeight: vertical ? button.height + Theme.bar.paddingX : barSize
 
   function togglePanel() {
-    tooltip.open = false
-    if (!root.bar) return
+    console.warn("[fanarchy] widget click on " + (root.screenName || "unknown screen"))
+    root.tooltipSuppressed = true
+    if (!root.bar) {
+      console.warn("[fanarchy] widget click ignored: no bar")
+      return
+    }
     // Omarchy's own panel API, in-process; the CLI only as a fallback.
     var shellApi = root.bar.shell
-    if (Client.panelToggleRoute(shellApi) === "api") shellApi.toggle(Client.PLUGIN_ID, "")
+    var route = Client.panelToggleRoute(shellApi)
+    console.warn("[fanarchy] widget toggle via " + route)
+    if (route === "api") shellApi.toggle(Client.PLUGIN_ID, Client.panelPayload(root.screenName))
     else root.bar.run(Client.togglePanelCommand())
   }
 
@@ -51,12 +66,21 @@ Ui.BarWidget {
     id: connection
   }
 
+  // The bar's click target. Omarchy's bar lays its own MouseArea over every
+  // widget and takes the press, then calls triggerPress(button) on the
+  // registered target under the pointer (as Ui.WidgetButton does); it also
+  // sets heldButtons for press feedback.
   Item {
     id: button
     anchors.centerIn: parent
     width: row.implicitWidth + Theme.bar.paddingX * 2
     height: Theme.bar.height
-    scale: mouse.pressed ? Theme.bar.pressScale : 1
+    property int heldButtons: Qt.NoButton
+    scale: (mouse.pressed || heldButtons !== Qt.NoButton) ? Theme.bar.pressScale : 1
+
+    function triggerPress(pressedButton) {
+      if (pressedButton === Qt.LeftButton) root.togglePanel()
+    }
 
     Accessible.role: Accessible.Button
     Accessible.name: root.view.accessibleName
@@ -104,7 +128,7 @@ Ui.BarWidget {
       anchors.fill: parent
       anchors.margins: Theme.bar.border
       color: root.hot ? Theme.colors.ink : (root.down ? Theme.colors.ash : Theme.colors.paper)
-      opacity: mouse.containsMouse ? Theme.bar.hoverWash : 0
+      opacity: root.hovered && !root.tooltipSuppressed ? Theme.bar.hoverWash : 0
 
       Behavior on opacity {
         NumberAnimation { duration: Theme.motion.duration; easing.type: Easing.InOutQuad }
@@ -139,13 +163,19 @@ Ui.BarWidget {
       }
     }
 
+    // Hover is tracked passively, so the bar's press grab can't leave it stuck.
+    HoverHandler {
+      id: hover
+      cursorShape: Qt.PointingHandCursor
+    }
+
+    // Only reached when the bar lets the click through (no bar overlay).
     MouseArea {
       id: mouse
       anchors.fill: parent
-      hoverEnabled: true
       acceptedButtons: Qt.LeftButton
       cursorShape: Qt.PointingHandCursor
-      onClicked: root.togglePanel()
+      onClicked: function(event) { button.triggerPress(event.button) }
     }
   }
 
@@ -154,7 +184,7 @@ Ui.BarWidget {
     anchorItem: button
     bar: root.bar
     view: root.view
-    open: mouse.containsMouse && !mouse.pressed
+    open: Placement.tooltipOpen(root.hovered, root.tooltipSuppressed)
     stencilFamily: stencilFont.name !== "" ? stencilFont.name : Theme.fonts.stencil.family
     monoFamily: monoRegular.name !== "" ? monoRegular.name : Theme.fonts.mono.family
     noteFamily: noteFont.name !== "" ? noteFont.name : Theme.fonts.note.family

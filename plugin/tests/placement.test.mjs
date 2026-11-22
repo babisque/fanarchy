@@ -36,3 +36,10 @@ test("clamps along the bar axis only", () => {
     { x: 70, y: 870 },
   );
 });
+
+test("tooltip shows on hover and stays hidden after a click until hover exits", () => {
+  assert.equal(Placement.tooltipOpen(true, false), true);
+  assert.equal(Placement.tooltipOpen(true, true), false);
+  assert.equal(Placement.tooltipOpen(false, false), false);
+  assert.equal(Placement.tooltipOpen(false, true), false);
+});
