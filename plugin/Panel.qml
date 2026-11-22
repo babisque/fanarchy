@@ -45,7 +45,13 @@ Item {
   // Omarchy's lifecycle owns the open state: shell.summon/toggle call
   // open(), shell.hide/toggle call close(), and shell.isPluginOpen reads
   // `opened`. Nothing else writes it.
+  // TEMPORARY debug logging ([fanarchy-dbg]).
+  function dbg(message) {
+    console.warn("[fanarchy-dbg] [" + (root.screenName || "?") + "] panel " + message)
+  }
+
   function open(payloadJson) {
+    root.dbg("open requested (payload=" + payloadJson + ", opened=" + root.opened + ")")
     var guard = Panel.reopenGuard(root.lastDismissMs, Date.now())
     root.lastDismissMs = guard.nextLastDismissMs
     if (guard.ignore) {
@@ -62,6 +68,7 @@ Item {
   }
 
   function close() {
+    root.dbg("close requested (opened=" + root.opened + ")")
     if (!root.opened) return
     console.warn("[fanarchy] panel close")
     root.opened = false
@@ -70,6 +77,7 @@ Item {
   }
 
   function toggle() {
+    root.dbg("toggle requested (opened=" + root.opened + ")")
     if (root.opened) root.dismiss("toggle")
     else root.open("")
   }
@@ -174,7 +182,10 @@ Item {
   }
   onSelectedIdChanged: root.resetDraft()
   onSavedCurveChanged: root.resetDraft()
-  onOpenedChanged: if (!opened) root.pendingMode = null
+  onOpenedChanged: {
+    root.dbg("opened flag=" + root.opened)
+    if (!opened) root.pendingMode = null
+  }
 
   Timer {
     id: confirmTimer
@@ -222,10 +233,15 @@ Item {
       // The open state follows the real window: if the compositor drops it
       // while the panel is marked open, close through the shell.
       onVisibleChanged: {
+        root.dbg("window visible=" + window.visible + " on " + (window.screen ? window.screen.name : "?"))
         if (Panel.windowLost(root.opened, window.visible)) root.dismiss("window lost")
         else window.armGrab()
       }
-      Component.onCompleted: window.armGrab()
+      Component.onCompleted: {
+        root.dbg("window created, visible=" + window.visible + " on " + (window.screen ? window.screen.name : "?"))
+        window.armGrab()
+      }
+      Component.onDestruction: root.dbg("window destroyed")
 
       // Start the grab a tick after the window shows, so it can't clear
       // itself before the surface is mapped. The timer dies with the window.

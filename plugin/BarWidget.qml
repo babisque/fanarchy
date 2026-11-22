@@ -24,7 +24,15 @@ Ui.BarWidget {
   readonly property string screenName: root.QsWindow.window && root.QsWindow.window.screen
     ? root.QsWindow.window.screen.name : ""
 
-  onHoveredChanged: if (!hovered) root.tooltipSuppressed = false
+  onHoveredChanged: {
+    root.dbg("widget hover " + (hovered ? "enter" : "exit"))
+    if (!hovered) root.tooltipSuppressed = false
+  }
+
+  // TEMPORARY debug logging ([fanarchy-dbg]); remove once the click bug is found.
+  function dbg(message) {
+    console.warn("[fanarchy-dbg] [" + (root.screenName || "?") + "] " + message)
+  }
 
   implicitWidth: vertical ? Math.max(barSize, button.width) : button.width
   implicitHeight: vertical ? button.height + Theme.bar.paddingX : barSize
@@ -78,7 +86,11 @@ Ui.BarWidget {
     property int heldButtons: Qt.NoButton
     scale: (mouse.pressed || heldButtons !== Qt.NoButton) ? Theme.bar.pressScale : 1
 
+    onHeldButtonsChanged: root.dbg("widget " + (heldButtons !== Qt.NoButton ? "pressed" : "released")
+      + " (bar overlay, heldButtons=" + heldButtons + ")")
+
     function triggerPress(pressedButton) {
+      root.dbg("widget clicked (triggerPress, button=" + pressedButton + ")")
       if (pressedButton === Qt.LeftButton) root.togglePanel()
     }
 
@@ -175,7 +187,12 @@ Ui.BarWidget {
       anchors.fill: parent
       acceptedButtons: Qt.LeftButton
       cursorShape: Qt.PointingHandCursor
-      onClicked: function(event) { button.triggerPress(event.button) }
+      onPressed: function(event) { root.dbg("widget mouse pressed (own MouseArea, button=" + event.button + ")") }
+      onReleased: function(event) { root.dbg("widget mouse released (own MouseArea, button=" + event.button + ")") }
+      onClicked: function(event) {
+        root.dbg("widget mouse clicked (own MouseArea, button=" + event.button + ")")
+        button.triggerPress(event.button)
+      }
     }
   }
 
@@ -185,6 +202,7 @@ Ui.BarWidget {
     bar: root.bar
     view: root.view
     open: Placement.tooltipOpen(root.hovered, root.tooltipSuppressed)
+    screenName: root.screenName
     stencilFamily: stencilFont.name !== "" ? stencilFont.name : Theme.fonts.stencil.family
     monoFamily: monoRegular.name !== "" ? monoRegular.name : Theme.fonts.mono.family
     noteFamily: noteFont.name !== "" ? noteFont.name : Theme.fonts.note.family
