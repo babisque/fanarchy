@@ -45,15 +45,7 @@ Item {
   // Omarchy's lifecycle owns the open state: shell.summon/toggle call
   // open(), shell.hide/toggle call close(), and shell.isPluginOpen reads
   // `opened`. Nothing else writes it.
-  // TEMPORARY debug logging ([fanarchy-dbg]).
-  Component.onCompleted: console.warn("[fanarchy-dbg] Panel loaded on",
-    root.screenName || (Hyprland.focusedMonitor ? Hyprland.focusedMonitor.name : "?"))
-  function dbg(message) {
-    console.warn("[fanarchy-dbg] [" + (root.screenName || "?") + "] panel " + message)
-  }
-
   function open(payloadJson) {
-    root.dbg("open requested (payload=" + payloadJson + ", opened=" + root.opened + ")")
     var guard = Panel.reopenGuard(root.lastDismissMs, Date.now())
     root.lastDismissMs = guard.nextLastDismissMs
     if (guard.ignore) {
@@ -70,7 +62,6 @@ Item {
   }
 
   function close() {
-    root.dbg("close requested (opened=" + root.opened + ")")
     if (!root.opened) return
     console.warn("[fanarchy] panel close")
     root.opened = false
@@ -79,7 +70,6 @@ Item {
   }
 
   function toggle() {
-    root.dbg("toggle requested (opened=" + root.opened + ")")
     if (root.opened) root.dismiss("toggle")
     else root.open("")
   }
@@ -151,7 +141,6 @@ Item {
 
   function handleReply(request, ok, data, error) {
     if (request.cmd === "get_config") {
-      root.dbg("get_config reply ok=" + ok + (ok ? " curves: " + Panel.curvesSummary(data) : " error=" + error))
       if (ok) {
         root.config = data
         root.resetDraft()
@@ -183,30 +172,19 @@ Item {
 
   // The config is only asked for once per connection; if that reply never
   // made it, ask again instead of leaving the editor empty.
-  function ensureConfig(reason) {
+  function ensureConfig() {
     if (!Panel.needsConfig(root.config, commands.connected, commands.pending)) return
-    root.dbg("config missing (" + reason + "), asking again")
     commands.send(Client.getConfigRequest())
   }
 
   onStatusChanged: {
     root.selectedId = Panel.pickSelection(root.status, root.selectedId)
     if (Panel.pendingSettled(root.selectedFan, root.pendingMode)) root.pendingMode = null
-    if (root.status) root.ensureConfig("status arrived")
+    if (root.status) root.ensureConfig()
   }
-  onSelectedIdChanged: {
-    root.dbg("selected " + root.selectedId)
-    root.resetDraft()
-  }
-  onSavedCurveChanged: {
-    root.dbg("curve for " + root.selectedId + ": " + JSON.stringify(root.savedCurve)
-      + " (config " + (root.config ? "loaded" : "missing") + ", inFlight=" + root.curveInFlight + ")")
-    root.resetDraft()
-  }
-  onOpenedChanged: {
-    root.dbg("opened flag=" + root.opened)
-    if (!opened) root.pendingMode = null
-  }
+  onSelectedIdChanged: root.resetDraft()
+  onSavedCurveChanged: root.resetDraft()
+  onOpenedChanged: if (!opened) root.pendingMode = null
 
   Timer {
     id: confirmTimer
@@ -224,7 +202,6 @@ Item {
   FanarchyCommands {
     id: commands
     active: root.opened
-    debugScreen: root.screenName
     onReady: commands.send(Client.getConfigRequest())
     onReplied: function(requestJson, ok, dataJson, error) {
       var reply = Client.decodeReply(requestJson, dataJson)
@@ -258,15 +235,10 @@ Item {
       // The open state follows the real window: if the compositor drops it
       // while the panel is marked open, close through the shell.
       onVisibleChanged: {
-        root.dbg("window visible=" + window.visible + " on " + (window.screen ? window.screen.name : "?"))
         if (Panel.windowLost(root.opened, window.visible)) root.dismiss("window lost")
         else window.armGrab()
       }
-      Component.onCompleted: {
-        root.dbg("window created, visible=" + window.visible + " on " + (window.screen ? window.screen.name : "?"))
-        window.armGrab()
-      }
-      Component.onDestruction: root.dbg("window destroyed")
+      Component.onCompleted: window.armGrab()
 
       // Start the grab a tick after the window shows, so it can't clear
       // itself before the surface is mapped. The timer dies with the window.

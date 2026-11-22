@@ -9,7 +9,6 @@ Item {
   id: root
 
   property bool active: true
-  property string debugScreen: ""   // TEMPORARY: for [fanarchy-dbg] lines
   property var pending: []
   readonly property bool connected: socket.connected
 
@@ -27,13 +26,7 @@ Item {
 
   visible: false
 
-  // TEMPORARY debug logging ([fanarchy-dbg]).
-  function dbg(message) {
-    console.warn("[fanarchy-dbg] [" + (root.debugScreen || "?") + "] commands " + message)
-  }
-
   function send(request) {
-    root.dbg("send " + request.cmd + " (connected=" + socket.connected + ", pending=" + root.pending.length + ")")
     if (!socket.connected) {
       root.reply(request, false, null, "the daemon is not reachable")
       return
@@ -68,11 +61,7 @@ Item {
 
     parser: SplitParser {
       onRead: function(data) {
-        root.dbg("read " + String(data).length + " bytes: " + String(data).slice(0, 160))
         var result = Client.settle(root.pending, data)
-        root.dbg("settled " + (result.request ? result.request.cmd : "(no request)")
-          + " ok=" + result.ok + (result.error ? " error=" + result.error : "")
-          + " pending left=" + result.queue.length)
         root.pending = result.queue
         if (result.log) console.warn(result.log)
         if (result.request) root.reply(result.request, result.ok, result.data, result.error)
@@ -80,13 +69,11 @@ Item {
     }
 
     onConnectionStateChanged: {
-      root.dbg("socket connected=" + socket.connected)
       if (socket.connected) root.ready()
       else root.failPending("the daemon disconnected")
     }
 
     onError: function(error) {
-      root.dbg("socket error " + Client.socketErrorText(error))
       root.failPending("the daemon disconnected (" + Client.socketErrorText(error) + ")")
     }
   }

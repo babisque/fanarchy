@@ -15,7 +15,6 @@ PopupWindow {
   required property Item anchorItem
   property var bar: null
   property bool open: false
-  property string screenName: ""   // TEMPORARY: for [fanarchy-dbg] lines
   property var view: ({ state: "down", rows: [], downReason: "stopped" })
   property string stencilFamily: Theme.fonts.stencil.family
   property string monoFamily: Theme.fonts.mono.family
@@ -28,15 +27,6 @@ PopupWindow {
 
   visible: open || frame.opacity > 0
 
-  // TEMPORARY debug logging ([fanarchy-dbg]).
-  function dbg(message) {
-    console.warn("[fanarchy-dbg] [" + (root.screenName || "?") + "] tooltip " + message)
-  }
-  onOpenChanged: root.dbg("shown=" + open)
-  Component.onCompleted: console.warn("[fanarchy-dbg] FanarchyTooltip loaded on",
-    root.anchorItem && root.anchorItem.QsWindow.window && root.anchorItem.QsWindow.window.screen
-      ? root.anchorItem.QsWindow.window.screen.name : "?")
-  onVisibleChanged: root.dbg("visible=" + visible)
   color: "transparent"
   mask: Region {}
   implicitWidth: Theme.tooltip.width + bleed * 2
