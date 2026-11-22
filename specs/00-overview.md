@@ -46,7 +46,7 @@
 ## 5. Visual Identity
 The look is a punk, DIY zine: photocopy texture, torn masking tape, stencil type and one signal red. Fanarchy keeps its own palette instead of following the Omarchy theme.
 
-* **Mockups (source of truth for layout):** https://claude.ai/artifact/2DN7a7fuDpvGY8XJ6HBenA. The link needs my login; when a phase needs a screen, I paste the relevant screenshot or values. The numbers and rules below are what the code must follow.
+* **Mockups:** kept privately by the maintainer and not published. The artboard names used in later specs ("Bar widget — states", "Panel + curve editor", "Offline + empty states", "README hero") refer to them; when a phase needs a screen, I paste the relevant screenshot or values. The numbers and rules below, plus the assets in `design/`, are what the code must follow.
 * **Palette** (define once in `plugin/models/theme.js`, never inline elsewhere):
 
   | Token | Hex | Use |
