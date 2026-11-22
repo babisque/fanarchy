@@ -62,11 +62,13 @@ fn fan_status(config: &Config, snapshot: &ControlSnapshot, fan: &FanConfig) -> F
     status
 }
 
-/// `fanN_input` on the output's chip, with `N` = the output's `pwmN`.
+/// `fanN_input` on the output's chip, with `N` from
+/// [`config::rpm_input_of`].
 fn rpm_of(config: &Config, chips: &[Chip], fan: &FanConfig) -> Option<u32> {
     let name = config.chips.get(&fan.chip)?;
     let chip = config::find_chip(chips, &fan.chip, name).ok()?;
-    chip.fans.iter().find(|f| f.index == fan.pwm)?.rpm
+    let input = config::rpm_input_of(fan);
+    chip.fans.iter().find(|f| f.index == input)?.rpm
 }
 
 fn round_percent(percent: f32) -> u8 {
@@ -159,6 +161,25 @@ mod tests {
         assert_eq!(case.mode, Some(FanMode::Auto));
         assert_eq!(case.percent, None);
         assert_eq!(case.rpm, Some(3000));
+    }
+
+    #[test]
+    fn rpm_input_picks_another_tachometer() {
+        let mut config = config();
+        let pump = config.fans.iter_mut().find(|f| f.id == "pump").unwrap();
+        pump.rpm_input = Some(3);
+        let snapshot = ControlSnapshot {
+            chips: vec![board()],
+            ..ControlSnapshot::default()
+        };
+        let status = build_status(&config, &snapshot, &GpuReading::default());
+        let pump = status.fans.iter().find(|f| f.id == "pump").unwrap();
+        assert_eq!(pump.rpm, Some(3000));
+
+        let mut config = self::config();
+        config.fans[0].rpm_input = Some(5);
+        let status = build_status(&config, &snapshot, &GpuReading::default());
+        assert_eq!(status.fans[0].rpm, None);
     }
 
     #[test]

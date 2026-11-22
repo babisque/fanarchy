@@ -213,7 +213,8 @@ pub struct FanStatus {
     pub sensor: Option<String>,
     /// Current reading of `sensor`, in °C.
     pub temp_c: Option<f32>,
-    /// `fanN_input` with the same `N` as the output's `pwmN`.
+    /// `fanN_input` with `N` = the config's `rpm_input`, or the same `N`
+    /// as the output's `pwmN` when it is not set.
     pub rpm: Option<u32>,
     /// Speed the daemon applies, in %. `None` for pumps and for fans
     /// under motherboard control (`auto` with no override).

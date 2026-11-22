@@ -124,6 +124,9 @@ fn check_config(path: &Path) -> Result<()> {
             return Ok(());
         }
     };
+    for warning in config::tachometer_warnings(&config, &chips) {
+        println!("warning: {warning}");
+    }
     match config::resolve(&config, &chips) {
         Ok(plan) => {
             for fan in &plan.fans {

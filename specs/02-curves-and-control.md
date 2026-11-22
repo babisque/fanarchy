@@ -17,7 +17,7 @@
 * **Config:** `serde` + `serde_json`, at `/etc/fanarchy/config.json`, validated before it is applied.
 * **Schema (v1):**
   * `chips`: identified by `name`.
-  * `fans[]`: `id`, `label`, `chip`, `pwm` (number), `role` (`fan` or `pump`), `sensor`, `curve` (points), `min_percent`.
+  * `fans[]`: `id`, `label`, `chip`, `pwm` (number), `role` (`fan` or `pump`), `sensor`, `curve` (points), `min_percent`. Optional on both roles: `rpm_input`, the `N` of the `fanN_input` tachometer when it differs from `pwm`.
   * `safety`: `critical_temp_c`, `sensor_fail_percent`.
 * **Flow:** read sensors → `curve::evaluate` (pure) → `safety::clamp` (pure) → `Hwmon::write_pwm`.
 * **Restore:** a drop guard, a signal handler and a panic hook, all calling the same restore function.

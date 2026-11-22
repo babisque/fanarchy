@@ -193,7 +193,7 @@ requests.
 | `fans[].role` | `fan` (controlled) or `pump` (never touched) |
 | `fans[].sensor` | `"<chip alias>/tempN"` the fan follows; `null` for pumps |
 | `fans[].temp_c` | current reading of `sensor` in °C; `null` if unreadable |
-| `fans[].rpm` | `fanN_input` with the same `N` as the output's `pwmN`; `null` if unavailable, `0` if stopped |
+| `fans[].rpm` | `fanN_input` with `N` = the config's `rpm_input`, or the same `N` as the output's `pwmN` when it is not set; `null` if unavailable, `0` if stopped |
 | `fans[].percent` | speed the daemon applies, rounded %. `null` for pumps and for `auto` fans while the motherboard drives them. |
 | `fans[].min_percent` | lowest speed the daemon will set; `null` for pumps |
 | `fans[].mode` | `curve`, `fixed` or `auto`; `null` for pumps |

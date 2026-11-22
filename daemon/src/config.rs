@@ -65,6 +65,10 @@ pub struct FanConfig {
     pub chip: String,
     /// The `N` in `pwmN`.
     pub pwm: u32,
+    /// The `N` of the `fanN_input` tachometer on the same chip, when it is
+    /// not the same as `pwm` (e.g. a pump wired to another header).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rpm_input: Option<u32>,
     pub role: Role,
     /// `"<chip alias>/tempN"`. Required for fans, forbidden for pumps.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -171,6 +175,8 @@ pub enum ValidationError {
     UnknownChip { fan: String, alias: String },
     #[error("fan '{fan}': pwm must be 1 or higher")]
     InvalidPwmIndex { fan: String },
+    #[error("fan '{fan}': rpm_input must be 1 or higher")]
+    InvalidRpmInput { fan: String },
     #[error("fans '{first}' and '{second}' both use {chip}/pwm{pwm}")]
     DuplicatePwm {
         chip: String,
@@ -229,6 +235,12 @@ pub enum ConfigWarning {
         "fan '{fan}': min_percent {value} is below {STALL_WARNING_PERCENT} %; many fans stall that low"
     )]
     LowMinPercent { fan: String, value: u8 },
+    #[error("fan '{fan}': {chip} has no fan{input}_input, so its RPM will show as unknown")]
+    MissingTachometer {
+        fan: String,
+        chip: String,
+        input: u32,
+    },
 }
 
 /// Errors matching the config against the detected hardware.
@@ -433,6 +445,11 @@ pub fn validate(config: &Config) -> Result<(), Vec<ValidationError>> {
                 fan: fan.id.clone(),
             });
         }
+        if fan.rpm_input == Some(0) {
+            errors.push(ValidationError::InvalidRpmInput {
+                fan: fan.id.clone(),
+            });
+        }
         if let Some(first) = outputs.insert((fan.chip.as_str(), fan.pwm), fan.id.as_str()) {
             errors.push(ValidationError::DuplicatePwm {
                 chip: fan.chip.clone(),
@@ -604,6 +621,33 @@ pub fn warnings(config: &Config) -> Vec<ConfigWarning> {
             (value < STALL_WARNING_PERCENT).then(|| ConfigWarning::LowMinPercent {
                 fan: fan.id.clone(),
                 value,
+            })
+        })
+        .collect()
+}
+
+/// The `N` of the `fanN_input` that reports this output's speed:
+/// `rpm_input` when set, otherwise the same `N` as `pwmN`.
+pub fn rpm_input_of(fan: &FanConfig) -> u32 {
+    fan.rpm_input.unwrap_or(fan.pwm)
+}
+
+/// Outputs whose tachometer is not on the detected chip. Chips that are
+/// not found are left to [`resolve`].
+pub fn tachometer_warnings(config: &Config, chips: &[Chip]) -> Vec<ConfigWarning> {
+    config
+        .fans
+        .iter()
+        .filter_map(|fan| {
+            let name = config.chips.get(&fan.chip)?;
+            let chip = find_chip(chips, &fan.chip, name).ok()?;
+            let input = rpm_input_of(fan);
+            (!chip.fans.iter().any(|f| f.index == input)).then(|| {
+                ConfigWarning::MissingTachometer {
+                    fan: fan.id.clone(),
+                    chip: chip.name.clone(),
+                    input,
+                }
             })
         })
         .collect()
@@ -879,7 +923,7 @@ pub fn restore_outputs(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hwmon::{PwmOutput, TempSensor};
+    use crate::hwmon::{Fan, PwmOutput, TempSensor};
 
     const VALID: &str = r#"{
         "version": 1,
@@ -1497,6 +1541,72 @@ mod tests {
         });
         let chips = [chip("hwmon2", "k10temp"), board];
         assert!(!same_outputs(&plan, &resolve(&moved, &chips).unwrap()));
+    }
+
+    #[test]
+    fn rpm_input_is_optional_and_round_trips() {
+        assert!(valid().fans.iter().all(|f| f.rpm_input.is_none()));
+        assert_eq!(rpm_input_of(&valid().fans[1]), 2);
+
+        let text = VALID.replace(
+            r#""pwm": 2, "role": "pump""#,
+            r#""pwm": 2, "rpm_input": 4, "role": "pump""#,
+        );
+        let config = parse(&text).unwrap();
+        assert_eq!(validate(&config), Ok(()));
+        assert_eq!(config.fans[1].rpm_input, Some(4));
+        assert_eq!(rpm_input_of(&config.fans[1]), 4);
+
+        let saved = serde_json::to_string_pretty(&config).unwrap();
+        assert!(saved.contains(r#""rpm_input": 4"#));
+        assert_eq!(parse(&saved).unwrap(), config);
+    }
+
+    #[test]
+    fn rpm_input_zero_is_rejected() {
+        let mut config = valid();
+        fan_mut(&mut config, "case").rpm_input = Some(0);
+        assert_eq!(
+            validate(&config),
+            Err(vec![ValidationError::InvalidRpmInput {
+                fan: "case".into()
+            }])
+        );
+    }
+
+    #[test]
+    fn rpm_input_survives_a_curve_change() {
+        let mut config = valid();
+        fan_mut(&mut config, "case").rpm_input = Some(5);
+        let mut changed = with_curve(&config, "case", vec![(30.0, 25.0), (80.0, 100.0)]).unwrap();
+        assert_eq!(fan_mut(&mut changed, "case").rpm_input, Some(5));
+    }
+
+    #[test]
+    fn tachometer_warnings_list_missing_inputs() {
+        let mut board = chip("hwmon5", "it8689_61030507");
+        board.fans = (1..=3)
+            .map(|index| Fan {
+                index,
+                label: None,
+                rpm: Some(1000),
+            })
+            .collect();
+        let chips = [chip("hwmon2", "k10temp"), board];
+        assert!(tachometer_warnings(&valid(), &chips).is_empty());
+
+        let mut config = valid();
+        fan_mut(&mut config, "pump").rpm_input = Some(5);
+        assert_eq!(
+            tachometer_warnings(&config, &chips),
+            vec![ConfigWarning::MissingTachometer {
+                fan: "pump".into(),
+                chip: "it8689_61030507".into(),
+                input: 5,
+            }]
+        );
+        // A chip that is not found is resolve's problem, not a warning.
+        assert!(tachometer_warnings(&config, &chips[..1]).is_empty());
     }
 
     #[test]
