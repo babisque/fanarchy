@@ -46,6 +46,8 @@ Item {
   // open(), shell.hide/toggle call close(), and shell.isPluginOpen reads
   // `opened`. Nothing else writes it.
   // TEMPORARY debug logging ([fanarchy-dbg]).
+  Component.onCompleted: console.warn("[fanarchy-dbg] Panel loaded on",
+    root.screenName || (Hyprland.focusedMonitor ? Hyprland.focusedMonitor.name : "?"))
   function dbg(message) {
     console.warn("[fanarchy-dbg] [" + (root.screenName || "?") + "] panel " + message)
   }

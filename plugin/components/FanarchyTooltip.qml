@@ -33,6 +33,9 @@ PopupWindow {
     console.warn("[fanarchy-dbg] [" + (root.screenName || "?") + "] tooltip " + message)
   }
   onOpenChanged: root.dbg("shown=" + open)
+  Component.onCompleted: console.warn("[fanarchy-dbg] FanarchyTooltip loaded on",
+    root.anchorItem && root.anchorItem.QsWindow.window && root.anchorItem.QsWindow.window.screen
+      ? root.anchorItem.QsWindow.window.screen.name : "?")
   onVisibleChanged: root.dbg("visible=" + visible)
   color: "transparent"
   mask: Region {}

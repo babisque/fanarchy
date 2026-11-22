@@ -60,7 +60,10 @@ Ui.BarWidget {
   }
 
   onBarChanged: syncClickRegistration()
-  Component.onCompleted: syncClickRegistration()
+  Component.onCompleted: {
+    console.warn("[fanarchy-dbg] BarWidget loaded on", root.screenName || "?")
+    syncClickRegistration()
+  }
   Component.onDestruction: {
     if (registeredBar && registeredBar.unregisterClickTarget) registeredBar.unregisterClickTarget(button)
   }
