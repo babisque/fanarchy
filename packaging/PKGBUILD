@@ -14,7 +14,7 @@ optdepends=('nvidia-utils: GPU temperatures in the status'
 options=('!debug')
 install=fanarchy.install
 source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
-sha256sums=('9afbc443f0a89a8a2872053298d2e081d3c4614d1cfaaa997ddbd8d10cc9918a')
+sha256sums=('093cdebf745780acf5584574e8bbb5d530da4079de6e613d1786b792dca60929')
 
 prepare() {
   cd "$pkgname-$pkgver"
