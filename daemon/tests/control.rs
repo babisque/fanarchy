@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::{FakeHwmon, RecordingHwmon, Write};
+use fanarchyd::config::ResolveError;
 use fanarchyd::config::{self, ChangeError, Config, Plan};
 use fanarchyd::control::{self, ControlError, Controller, Mode, PanicHook, RestoreGuard, Restorer};
 use fanarchyd::hwmon::Hwmon;
@@ -531,7 +532,7 @@ fn replace_plan_keeps_outputs_and_resets_modes() {
 
     let mut changed = config.clone();
     changed.fans[2].curve = Some(vec![(30.0, 100.0), (80.0, 100.0)]);
-    let new_plan = controller.resolve(&changed).unwrap();
+    let new_plan = controller.check_change(&changed).unwrap();
     assert!(config::same_outputs(controller.plan(), &new_plan));
     controller.replace_plan(new_plan);
     controller.tick().unwrap();
@@ -541,4 +542,122 @@ fn replace_plan_keeps_outputs_and_resets_modes() {
     let snapshot = controller.snapshot();
     let case = snapshot.fans.iter().find(|f| f.id == "case").unwrap();
     assert_eq!(case.mode, Mode::Curve);
+}
+
+/// The scenario from the marketplace review (#15664): `board2` is a
+/// second alias for the board chip, and the case fan sits on the pump's
+/// `pwm2` through it.
+fn aliased_pump_config() -> Config {
+    let mut config = example_config();
+    config
+        .chips
+        .insert("board2".into(), "it8689_61030507".into());
+    let case = config.fans.iter_mut().find(|f| f.id == "case").unwrap();
+    case.chip = "board2".into();
+    case.pwm = 2;
+    config
+}
+
+/// A plan with an extra fan on the pump's output, as if validation had
+/// been bypassed.
+fn plan_with_fan_on_pump(mut plan: Plan) -> Plan {
+    let mut intruder = plan.fans[0].clone();
+    intruder.id = "intruder".into();
+    intruder.output.index = 2;
+    plan.fans.push(intruder);
+    plan
+}
+
+fn assert_pump_never_written(hw: &RecordingHwmon) {
+    for write in hw.writes() {
+        assert!(
+            !write.file().starts_with(&format!("{BOARD}/pwm2")),
+            "wrote {write:?}"
+        );
+    }
+    assert_eq!(board(hw, "pwm2_enable"), "2");
+}
+
+#[tokio::test]
+async fn fan_on_pump_output_through_another_alias_refuses_to_start() {
+    let hw = hardware();
+    let original = snapshot_untouchable(&hw);
+    let config = aliased_pump_config();
+    assert!(config::validate(&config).is_ok());
+
+    let result = control::run(
+        Arc::clone(&hw),
+        &config,
+        PanicHook::Skip,
+        std::future::pending(),
+    )
+    .await;
+    let Err(ControlError::Resolve(errors)) = result else {
+        panic!("expected resolve errors, got {result:?}");
+    };
+    let pump_output = hw.fake.root().join(BOARD).join("pwm2");
+    assert!(
+        errors.contains(&ResolveError::PumpOutputClaimed {
+            fan: "case".into(),
+            pump: "pump".into(),
+            output: pump_output,
+        }),
+        "{errors:?}"
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|e| matches!(e, ResolveError::ChipAliasesShareChip { first, second, .. } if first == "board" && second == "board2")),
+        "{errors:?}"
+    );
+    assert!(hw.writes().is_empty());
+    assert_untouched(&hw, &original);
+}
+
+#[test]
+fn start_refuses_a_plan_with_a_fan_on_the_pump() {
+    let hw = hardware();
+    let plan = plan_with_fan_on_pump(plan(&hw, &example_config()));
+    let Err(err) = Controller::start(Arc::clone(&hw), plan) else {
+        panic!("start accepted a fan on the pump output");
+    };
+    assert!(
+        matches!(&err, ControlError::ProtectedOutput { fan, .. } if fan == "intruder"),
+        "{err:?}"
+    );
+    assert_pump_never_written(&hw);
+}
+
+#[test]
+fn tick_never_writes_the_pump_even_with_a_tampered_plan() {
+    let hw = hardware();
+    let config = example_config();
+    let mut controller = Controller::start(Arc::clone(&hw), plan(&hw, &config)).unwrap();
+    let tampered = plan_with_fan_on_pump(controller.plan().clone());
+    controller.replace_plan(tampered);
+    for raw in ["30000", "90000", "-127000", "50000"] {
+        set_cpu_temp(&hw, raw);
+        controller.tick().unwrap();
+    }
+    controller.set_mode("intruder", Mode::Auto).unwrap();
+    controller.tick().unwrap();
+    assert_pump_never_written(&hw);
+}
+
+#[test]
+fn restorer_never_writes_the_pump_even_with_a_tampered_plan() {
+    let hw = hardware();
+    let plan = plan_with_fan_on_pump(plan(&hw, &example_config()));
+    let restorer = Restorer::new(Arc::clone(&hw), &plan);
+    assert!(restorer.restore());
+    assert_pump_never_written(&hw);
+    assert_eq!(hw.writes().len(), 2, "{:?}", hw.writes());
+}
+
+#[test]
+fn restore_from_config_skips_a_fan_aliased_onto_the_pump() {
+    let hw = hardware();
+    let report = control::restore_from_config(hw.as_ref(), &aliased_pump_config()).unwrap();
+    assert_eq!(report.restored, ["radiator"]);
+    assert_pump_never_written(&hw);
 }

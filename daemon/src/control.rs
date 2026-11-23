@@ -16,7 +16,8 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::MissedTickBehavior;
 
 use crate::config::{
-    self, ChangeError, Config, ControlledFan, Plan, ResolveError, ResolvedSensor, SafetySettings,
+    self, ChangeError, Config, ControlledFan, LiveChangeError, Plan, ResolveError, ResolvedSensor,
+    SafetySettings,
 };
 use crate::curve::{self, CurvePoint};
 use crate::hwmon::{Chip, Hwmon, HwmonError, OutputRef, PwmMode};
@@ -46,6 +47,10 @@ pub enum ControlError {
     },
     #[error("hardware errors for {0} ticks in a row, giving up")]
     TooManyFailures(u32),
+    #[error("fan '{fan}': refusing to write {}, it belongs to a pump", .output.display())]
+    ProtectedOutput { fan: String, output: PathBuf },
+    #[error("fan '{fan}': refusing to write {}, it is not in the plan", .output.display())]
+    OutsidePlan { fan: String, output: PathBuf },
 }
 
 fn bullet_list<T: std::fmt::Display>(items: &[T]) -> String {
@@ -277,7 +282,7 @@ impl<H: Hwmon> Controller<H> {
             let temp = read_sensor(&chips, &fan.sensor);
             let (state, duty) = step(fan, &plan.safety, &FanState::default(), cpu, temp);
             log_override_change(fan, &plan, Override::None, state.over, cpu, temp);
-            take_control(hwmon.as_ref(), fan, duty)?;
+            take_control(hwmon.as_ref(), &plan, fan, duty)?;
             fans.push(FanRuntime {
                 state,
                 mode: Mode::Curve,
@@ -400,10 +405,13 @@ impl<H: Hwmon> Controller<H> {
         Ok(())
     }
 
-    /// Match `config` against the hardware, as at startup.
-    pub fn resolve(&self, config: &Config) -> Result<Plan, ControlError> {
-        let chips = self.hwmon.chips()?;
-        config::resolve(config, &chips).map_err(ControlError::Resolve)
+    /// Check a config that would replace the running one against the
+    /// hardware: every rule checked at startup, pump outputs included,
+    /// and the same controlled outputs (see [`config::resolve_change`]).
+    pub fn check_change(&self, config: &Config) -> Result<Plan, String> {
+        let chips = self.hwmon.chips().map_err(|e| e.to_string())?;
+        config::resolve_change(&self.plan, config, &chips)
+            .map_err(|e: LiveChangeError| e.to_string())
     }
 
     /// Switch to a plan controlling the same outputs (see
@@ -451,10 +459,10 @@ fn apply<H: Hwmon>(
 ) -> bool {
     match action {
         Action::Write(duty) if runtime.released => {
-            if !in_plan(plan, fan) {
+            if check_writable(plan, fan).is_err() {
                 return true;
             }
-            match take_control(hwmon, fan, duty) {
+            match take_control(hwmon, plan, fan, duty) {
                 Ok(()) => {
                     runtime.released = false;
                     runtime.written = Some(duty);
@@ -468,7 +476,7 @@ fn apply<H: Hwmon>(
             }
         }
         Action::Write(duty) => {
-            if runtime.written == Some(duty) || !in_plan(plan, fan) {
+            if runtime.written == Some(duty) || check_writable(plan, fan).is_err() {
                 return true;
             }
             match hwmon.write_pwm(&fan.output, duty) {
@@ -484,7 +492,7 @@ fn apply<H: Hwmon>(
             }
         }
         Action::Release => {
-            if runtime.released || !in_plan(plan, fan) {
+            if runtime.released || check_writable(plan, fan).is_err() {
                 return true;
             }
             match hwmon.write_enable(&fan.output, AUTOMATIC) {
@@ -503,16 +511,35 @@ fn apply<H: Hwmon>(
     }
 }
 
-/// Defence in depth: only outputs from the validated plan are written.
-fn in_plan(plan: &Plan, fan: &ControlledFan) -> bool {
-    let ok = plan.controls(&fan.output);
-    if !ok {
-        tracing::error!(fan = %fan.id, "refusing to write an output outside the plan");
-    }
-    ok
+/// Defence in depth, checked before every write of the control loop:
+/// a pump's output is never written, whatever the plan's fans say, and
+/// only outputs of the plan's fans are.
+pub fn check_writable(plan: &Plan, fan: &ControlledFan) -> Result<(), ControlError> {
+    let output = fan.output.pwm_path();
+    let refused = if plan.is_protected(&fan.output) {
+        ControlError::ProtectedOutput {
+            fan: fan.id.clone(),
+            output,
+        }
+    } else if !plan.controls(&fan.output) {
+        ControlError::OutsidePlan {
+            fan: fan.id.clone(),
+            output,
+        }
+    } else {
+        return Ok(());
+    };
+    tracing::error!(%refused, "write refused");
+    Err(refused)
 }
 
-fn take_control<H: Hwmon>(hwmon: &H, fan: &ControlledFan, duty: Duty) -> Result<(), ControlError> {
+fn take_control<H: Hwmon>(
+    hwmon: &H,
+    plan: &Plan,
+    fan: &ControlledFan,
+    duty: Duty,
+) -> Result<(), ControlError> {
+    check_writable(plan, fan)?;
     match hwmon.write_pwm(&fan.output, duty) {
         Ok(()) => {}
         Err(err) if err.is_busy() => tracing::debug!(
@@ -610,6 +637,14 @@ impl<H: Hwmon> Restorer<H> {
         let outputs = plan
             .fans
             .iter()
+            .filter(|fan| {
+                // Defence in depth: never restore (write) a pump's output.
+                let protected = plan.is_protected(&fan.output);
+                if protected {
+                    tracing::error!(fan = %fan.id, "output belongs to a pump, not restoring it");
+                }
+                !protected
+            })
             .map(|fan| {
                 if fan.original_mode == PwmMode::Manual {
                     tracing::warn!(
@@ -828,6 +863,7 @@ fn handle_request<H: Hwmon>(
             let changed = config::with_curve(&state.config, &fan, points.clone())
                 .map_err(|e| e.to_string())?;
             controller.fan(&fan).map_err(|e| e.to_string())?;
+            controller.check_change(&changed)?;
             config::save_atomic(&service.config_path, &changed).map_err(|e| e.one_line())?;
             controller
                 .set_curve(&fan, points)
@@ -846,23 +882,7 @@ fn handle_request<H: Hwmon>(
         }
         Request::Reload => {
             let config = config::load(&service.config_path).map_err(|e| e.one_line())?;
-            let plan = controller.resolve(&config).map_err(|e| match e {
-                ControlError::Resolve(errors) => format!(
-                    "config does not match the hardware: {}",
-                    errors
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join("; ")
-                ),
-                other => other.to_string(),
-            })?;
-            if !config::same_outputs(controller.plan(), &plan) {
-                return Err(
-                    "controlled outputs changed; restart the daemon (sudo systemctl restart fanarchyd)"
-                        .to_string(),
-                );
-            }
+            let plan = controller.check_change(&config)?;
             for warning in config::warnings(&config) {
                 tracing::warn!("{warning}");
             }

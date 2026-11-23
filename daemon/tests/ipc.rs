@@ -423,6 +423,47 @@ async fn reload_applies_changes_but_not_new_outputs() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn reload_rejects_a_fan_aliased_onto_the_pump() {
+    let daemon = start().await;
+    let mut client = daemon.client().await;
+    let original = daemon.config_bytes();
+
+    // The scenario from the marketplace review (#15664).
+    let mut aliased: Value = serde_json::from_slice(&original).unwrap();
+    aliased["chips"]["board2"] = json!("it8689_61030507");
+    aliased["fans"][2]["chip"] = json!("board2");
+    aliased["fans"][2]["pwm"] = json!(2);
+    fs::write(&daemon.config_path, aliased.to_string()).unwrap();
+
+    let response = client.call(json!({"cmd": "reload"})).await;
+    let error = error_of(&response);
+    assert!(
+        error.starts_with("config does not match the hardware: "),
+        "{error}"
+    );
+    assert!(
+        error.contains("chip aliases 'board' and 'board2' both resolve to it8689_61030507"),
+        "{error}"
+    );
+    assert!(
+        error.contains("fan 'case' and pump 'pump' both resolve to")
+            && error.contains("/hwmon5/pwm2; a pump output is never controlled"),
+        "{error}"
+    );
+
+    // Still running the old config, and the pump was never written.
+    let config = client.call(json!({"cmd": "get_config"})).await;
+    assert_eq!(config["data"]["fans"][2]["chip"], "board");
+    assert_eq!(config["data"]["fans"][2]["pwm"], 3);
+    wait_ticks(3).await;
+    for write in daemon.hw.writes() {
+        assert!(!write.file().starts_with("hwmon5/pwm2"), "wrote {write:?}");
+    }
+    assert_eq!(daemon.board("pwm2_enable"), "2");
+    daemon.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn serves_several_clients_at_once() {
     let daemon = start().await;
     let mut watcher = daemon.client().await;

@@ -260,8 +260,42 @@ pub enum ResolveError {
     EnableUnreadable { fan: String, chip: String, pwm: u32 },
     #[error("sensor '{sensor}' not found")]
     SensorNotFound { sensor: String },
+    #[error(
+        "chip aliases '{first}' and '{second}' both resolve to {chip} ({}); use one alias per chip",
+        .path.display()
+    )]
+    ChipAliasesShareChip {
+        first: String,
+        second: String,
+        chip: String,
+        path: PathBuf,
+    },
+    #[error(
+        "fan '{fan}' and pump '{pump}' both resolve to {}; a pump output is never controlled",
+        .output.display()
+    )]
+    PumpOutputClaimed {
+        fan: String,
+        pump: String,
+        output: PathBuf,
+    },
+    #[error("'{first}' and '{second}' both resolve to {}", .output.display())]
+    DuplicateOutput {
+        first: String,
+        second: String,
+        output: PathBuf,
+    },
     #[error("{0}")]
     Invalid(ValidationError),
+}
+
+/// Why a new config cannot replace the running one (`reload`, `set_curve`).
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum LiveChangeError {
+    #[error("config does not match the hardware: {}", semicolon_list(.0))]
+    Resolve(Vec<ResolveError>),
+    #[error("controlled outputs changed; restart the daemon (sudo systemctl restart fanarchyd)")]
+    OutputsChanged,
 }
 
 fn semicolon_list<T: fmt::Display>(items: &[T]) -> String {
@@ -408,6 +442,21 @@ pub fn same_outputs(old: &Plan, new: &Plan) -> bool {
         plan.fans.iter().map(|fan| fan.output.clone()).collect()
     };
     old.fans.len() == new.fans.len() && outputs(old) == outputs(new)
+}
+
+/// Check a new config before it replaces the running one: every rule of
+/// [`resolve`] (including the physical pump checks) and the same
+/// controlled outputs as `current`.
+pub fn resolve_change(
+    current: &Plan,
+    config: &Config,
+    chips: &[Chip],
+) -> Result<Plan, LiveChangeError> {
+    let plan = resolve(config, chips).map_err(LiveChangeError::Resolve)?;
+    if !same_outputs(current, &plan) {
+        return Err(LiveChangeError::OutputsChanged);
+    }
+    Ok(plan)
 }
 
 /// Check every schema rule. Returns all broken rules at once.
@@ -719,80 +768,72 @@ pub struct SafetySettings {
     pub sensor_fail_percent: u8,
 }
 
-/// Everything the control loop needs. Only `role: fan` outputs are here.
+/// Everything the control loop needs. Only `role: fan` outputs are in
+/// `fans`; the physical output of every pump is in `protected`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Plan {
     pub fans: Vec<ControlledFan>,
+    /// Pump outputs. The control loop refuses to write them, whatever
+    /// `fans` says.
+    pub protected: Vec<OutputRef>,
     pub cpu_sensor: ResolvedSensor,
     pub safety: SafetySettings,
 }
 
 impl Plan {
-    /// Whether the daemon may write to `output`.
+    /// Whether `output` is one of the fans in the plan.
     pub fn controls(&self, output: &OutputRef) -> bool {
         self.fans.iter().any(|fan| &fan.output == output)
+    }
+
+    /// Whether `output` belongs to a pump.
+    pub fn is_protected(&self, output: &OutputRef) -> bool {
+        self.protected.contains(output)
     }
 }
 
 /// Match a validated config against the detected chips.
 ///
-/// Fails when a chip, `pwmN`, readable `pwmN_enable` or sensor is
-/// missing. Pump outputs are not looked up at all.
+/// Every entry, pumps included, is resolved to its physical output (the
+/// chip directory and `pwmN` index that writes go to), so two aliases
+/// for the same chip cannot hide a fan on a pump's output. Fails when a
+/// chip, `pwmN`, readable `pwmN_enable` or sensor is missing, when two
+/// aliases resolve to the same chip, or when two entries resolve to the
+/// same output.
 pub fn resolve(config: &Config, chips: &[Chip]) -> Result<Plan, Vec<ResolveError>> {
-    let mut errors = Vec::new();
+    let mut errors = alias_conflicts(config, chips);
     let mut fans = Vec::new();
+    let mut protected = Vec::new();
+    let mut physical: Vec<(&FanConfig, OutputRef)> = Vec::new();
 
-    for fan in config.fans.iter().filter(|fan| fan.role == Role::Fan) {
-        let output = resolve_output(config, chips, fan);
-        let sensor = fan
-            .sensor
-            .as_deref()
-            .ok_or_else(|| {
-                ResolveError::Invalid(ValidationError::MissingField {
-                    fan: fan.id.clone(),
-                    field: "sensor",
-                })
-            })
-            .and_then(|sensor| resolve_sensor(config, chips, sensor));
-        let curve = fan.curve.clone().ok_or_else(|| {
-            ResolveError::Invalid(ValidationError::MissingField {
-                fan: fan.id.clone(),
-                field: "curve",
-            })
-        });
-        let min_percent = fan.min_percent.ok_or_else(|| {
-            ResolveError::Invalid(ValidationError::MissingField {
-                fan: fan.id.clone(),
-                field: "min_percent",
-            })
-        });
-        match (output, sensor, curve, min_percent) {
-            (Ok((output, original_mode)), Ok(sensor), Ok(curve), Ok(min_percent)) => {
-                fans.push(ControlledFan {
-                    id: fan.id.clone(),
-                    output,
-                    original_mode,
-                    sensor,
-                    curve,
-                    min_percent,
-                    hysteresis_c: fan.hysteresis_c.unwrap_or(DEFAULT_HYSTERESIS_C),
-                    step_up_percent: fan.step_up_percent.unwrap_or(DEFAULT_STEP_UP_PERCENT),
-                    step_down_percent: fan.step_down_percent.unwrap_or(DEFAULT_STEP_DOWN_PERCENT),
-                });
-            }
-            (output, sensor, curve, min_percent) => {
-                errors.extend(output.err());
-                errors.extend(sensor.err());
-                errors.extend(curve.err());
-                errors.extend(min_percent.err());
+    for fan in &config.fans {
+        match fan.role {
+            Role::Pump => match resolve_pump_output(config, chips, fan) {
+                Ok(output) => {
+                    physical.push((fan, output.clone()));
+                    protected.push(output);
+                }
+                Err(err) => errors.push(err),
+            },
+            Role::Fan => {
+                let output = resolve_output(config, chips, fan);
+                if let Ok((output, _)) = &output {
+                    physical.push((fan, output.clone()));
+                }
+                match controlled_fan(config, chips, fan, output) {
+                    Ok(controlled) => fans.push(controlled),
+                    Err(fan_errors) => errors.extend(fan_errors),
+                }
             }
         }
     }
+    errors.extend(physical_conflicts(&physical));
 
     let cpu_sensor = resolve_sensor(config, chips, &config.safety.cpu_sensor);
     match cpu_sensor {
         Ok(cpu_sensor) if errors.is_empty() => Ok(Plan {
             fans,
+            protected,
             cpu_sensor,
             safety: SafetySettings {
                 critical_temp_c: config.safety.critical_temp_c,
@@ -802,6 +843,133 @@ pub fn resolve(config: &Config, chips: &[Chip]) -> Result<Plan, Vec<ResolveError
         Ok(_) => Err(errors),
         Err(err) => {
             errors.push(err);
+            Err(errors)
+        }
+    }
+}
+
+/// Aliases in `config.chips` that resolve to the same detected chip.
+/// Aliases whose chip is missing or ambiguous are left to the entries
+/// that use them.
+fn alias_conflicts(config: &Config, chips: &[Chip]) -> Vec<ResolveError> {
+    let mut first_alias: HashMap<&Path, &str> = HashMap::new();
+    let mut errors = Vec::new();
+    for (alias, name) in &config.chips {
+        let Ok(chip) = find_chip(chips, alias, name) else {
+            continue;
+        };
+        match first_alias.get(chip.path.as_path()) {
+            Some(first) => errors.push(ResolveError::ChipAliasesShareChip {
+                first: (*first).to_string(),
+                second: alias.clone(),
+                chip: chip.name.clone(),
+                path: chip.path.clone(),
+            }),
+            None => {
+                first_alias.insert(chip.path.as_path(), alias.as_str());
+            }
+        }
+    }
+    errors
+}
+
+/// Entries that resolve to the same physical output, in config order.
+///
+/// A fan on a pump's output is [`ResolveError::PumpOutputClaimed`]; any
+/// other pair is [`ResolveError::DuplicateOutput`].
+pub fn physical_conflicts(entries: &[(&FanConfig, OutputRef)]) -> Vec<ResolveError> {
+    let mut errors = Vec::new();
+    for (position, (second, output)) in entries.iter().enumerate() {
+        for (first, earlier) in &entries[..position] {
+            if earlier != output {
+                continue;
+            }
+            let error = match (first.role, second.role) {
+                (Role::Pump, Role::Fan) => ResolveError::PumpOutputClaimed {
+                    fan: second.id.clone(),
+                    pump: first.id.clone(),
+                    output: output.pwm_path(),
+                },
+                (Role::Fan, Role::Pump) => ResolveError::PumpOutputClaimed {
+                    fan: first.id.clone(),
+                    pump: second.id.clone(),
+                    output: output.pwm_path(),
+                },
+                _ => ResolveError::DuplicateOutput {
+                    first: first.id.clone(),
+                    second: second.id.clone(),
+                    output: output.pwm_path(),
+                },
+            };
+            errors.push(error);
+        }
+    }
+    errors
+}
+
+/// A pump's physical output. The `pwmN` file need not exist: the output
+/// is only recorded so nothing ever writes it.
+fn resolve_pump_output(
+    config: &Config,
+    chips: &[Chip],
+    pump: &FanConfig,
+) -> Result<OutputRef, ResolveError> {
+    let chip = resolve_alias(config, chips, &pump.chip)?;
+    Ok(OutputRef {
+        chip_path: chip.path.clone(),
+        index: pump.pwm,
+    })
+}
+
+/// A `role: fan` entry with its settings and defaults applied.
+fn controlled_fan(
+    config: &Config,
+    chips: &[Chip],
+    fan: &FanConfig,
+    output: Result<(OutputRef, PwmMode), ResolveError>,
+) -> Result<ControlledFan, Vec<ResolveError>> {
+    let sensor = fan
+        .sensor
+        .as_deref()
+        .ok_or_else(|| {
+            ResolveError::Invalid(ValidationError::MissingField {
+                fan: fan.id.clone(),
+                field: "sensor",
+            })
+        })
+        .and_then(|sensor| resolve_sensor(config, chips, sensor));
+    let curve = fan.curve.clone().ok_or_else(|| {
+        ResolveError::Invalid(ValidationError::MissingField {
+            fan: fan.id.clone(),
+            field: "curve",
+        })
+    });
+    let min_percent = fan.min_percent.ok_or_else(|| {
+        ResolveError::Invalid(ValidationError::MissingField {
+            fan: fan.id.clone(),
+            field: "min_percent",
+        })
+    });
+    match (output, sensor, curve, min_percent) {
+        (Ok((output, original_mode)), Ok(sensor), Ok(curve), Ok(min_percent)) => {
+            Ok(ControlledFan {
+                id: fan.id.clone(),
+                output,
+                original_mode,
+                sensor,
+                curve,
+                min_percent,
+                hysteresis_c: fan.hysteresis_c.unwrap_or(DEFAULT_HYSTERESIS_C),
+                step_up_percent: fan.step_up_percent.unwrap_or(DEFAULT_STEP_UP_PERCENT),
+                step_down_percent: fan.step_down_percent.unwrap_or(DEFAULT_STEP_DOWN_PERCENT),
+            })
+        }
+        (output, sensor, curve, min_percent) => {
+            let mut errors = Vec::new();
+            errors.extend(output.err());
+            errors.extend(sensor.err());
+            errors.extend(curve.err());
+            errors.extend(min_percent.err());
             Err(errors)
         }
     }
@@ -876,26 +1044,17 @@ fn resolve_sensor(
 ///
 /// Best effort, for use after a crash: works on a config that was not
 /// validated and does not need `pwmN_enable` to be readable. Only
-/// `role: fan` outputs are returned, and an output that any pump also
-/// claims is skipped, so a broken config can never reach a pump.
+/// `role: fan` outputs are returned, and a physical output any pump may
+/// be on is skipped, so a broken config can never reach a pump.
 pub fn restore_outputs(
     config: &Config,
     chips: &[Chip],
 ) -> (Vec<(String, OutputRef)>, Vec<ResolveError>) {
-    let pumps: HashSet<(&str, u32)> = config
-        .fans
-        .iter()
-        .filter(|fan| fan.role == Role::Pump)
-        .map(|fan| (fan.chip.as_str(), fan.pwm))
-        .collect();
+    let pumps = possible_pump_outputs(config, chips);
 
     let mut outputs = Vec::new();
     let mut errors = Vec::new();
     for fan in config.fans.iter().filter(|fan| fan.role == Role::Fan) {
-        if pumps.contains(&(fan.chip.as_str(), fan.pwm)) {
-            tracing::warn!(fan = %fan.id, "output is also claimed by a pump, not restoring it");
-            continue;
-        }
         let chip = match resolve_alias(config, chips, &fan.chip) {
             Ok(chip) => chip,
             Err(err) => {
@@ -903,11 +1062,15 @@ pub fn restore_outputs(
                 continue;
             }
         };
+        let output = OutputRef {
+            chip_path: chip.path.clone(),
+            index: fan.pwm,
+        };
+        if pumps.contains(&output) {
+            tracing::warn!(fan = %fan.id, "output is also claimed by a pump, not restoring it");
+            continue;
+        }
         if chip.pwms.iter().any(|pwm| pwm.index == fan.pwm) {
-            let output = OutputRef {
-                chip_path: chip.path.clone(),
-                index: fan.pwm,
-            };
             outputs.push((fan.id.clone(), output));
         } else {
             errors.push(ResolveError::PwmNotFound {
@@ -918,6 +1081,26 @@ pub fn restore_outputs(
         }
     }
     (outputs, errors)
+}
+
+/// Every physical output a pump could be on. A pump whose chip name is
+/// ambiguous protects its `pwmN` on every chip that name matches.
+fn possible_pump_outputs(config: &Config, chips: &[Chip]) -> HashSet<OutputRef> {
+    config
+        .fans
+        .iter()
+        .filter(|fan| fan.role == Role::Pump)
+        .flat_map(|pump| {
+            let name = config.chips.get(&pump.chip);
+            chips
+                .iter()
+                .filter(move |chip| name.is_some_and(|name| chip_name_matches(name, &chip.name)))
+                .map(|chip| OutputRef {
+                    chip_path: chip.path.clone(),
+                    index: pump.pwm,
+                })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -1607,6 +1790,179 @@ mod tests {
         );
         // A chip that is not found is resolve's problem, not a warning.
         assert!(tachometer_warnings(&config, &chips[..1]).is_empty());
+    }
+
+    /// The scenario from the marketplace review (#15664): a second alias
+    /// for the board chip, and a fan on the pump's `pwm2` through it.
+    fn aliased_pump_config(second_name: &str) -> Config {
+        let mut config = valid();
+        config.chips.insert("board2".into(), second_name.into());
+        let case = fan_mut(&mut config, "case");
+        case.chip = "board2".into();
+        case.pwm = 2;
+        config
+    }
+
+    #[test]
+    fn plan_protects_pump_outputs() {
+        let chips = [chip("hwmon2", "k10temp"), chip("hwmon5", "it8689_61030507")];
+        let plan = resolve(&valid(), &chips).unwrap();
+        let pump = OutputRef {
+            chip_path: PathBuf::from("/fake/hwmon5"),
+            index: 2,
+        };
+        assert_eq!(plan.protected, std::slice::from_ref(&pump));
+        assert!(plan.is_protected(&pump));
+        assert!(plan.fans.iter().all(|fan| !plan.is_protected(&fan.output)));
+    }
+
+    #[test]
+    fn fan_on_pump_output_through_another_alias_is_rejected() {
+        let chips = [chip("hwmon2", "k10temp"), chip("hwmon5", "it8689_61030507")];
+        for second_name in ["it8689_61030507", "it8689"] {
+            let config = aliased_pump_config(second_name);
+            // The aliases differ, so the file on its own looks fine...
+            assert_eq!(validate(&config), Ok(()), "{second_name}");
+            // ...but both entries land on the same physical output.
+            let errors = resolve(&config, &chips).unwrap_err();
+            assert!(
+                errors.contains(&ResolveError::ChipAliasesShareChip {
+                    first: "board".into(),
+                    second: "board2".into(),
+                    chip: "it8689_61030507".into(),
+                    path: PathBuf::from("/fake/hwmon5"),
+                }),
+                "{second_name}: {errors:?}"
+            );
+            assert!(
+                errors.contains(&ResolveError::PumpOutputClaimed {
+                    fan: "case".into(),
+                    pump: "pump".into(),
+                    output: PathBuf::from("/fake/hwmon5/pwm2"),
+                }),
+                "{second_name}: {errors:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn pump_output_error_names_both_entries() {
+        let error = ResolveError::PumpOutputClaimed {
+            fan: "case".into(),
+            pump: "pump".into(),
+            output: PathBuf::from("/fake/hwmon5/pwm2"),
+        };
+        assert_eq!(
+            error.to_string(),
+            "fan 'case' and pump 'pump' both resolve to /fake/hwmon5/pwm2; a pump output is never controlled"
+        );
+    }
+
+    #[test]
+    fn two_fans_on_one_output_through_aliases_are_rejected() {
+        let chips = [chip("hwmon2", "k10temp"), chip("hwmon5", "it8689")];
+        let mut config = valid();
+        config.chips.insert("board2".into(), "it8689".into());
+        let case = fan_mut(&mut config, "case");
+        case.chip = "board2".into();
+        case.pwm = 1;
+        assert_eq!(validate(&config), Ok(()));
+        let errors = resolve(&config, &chips).unwrap_err();
+        assert!(errors.contains(&ResolveError::DuplicateOutput {
+            first: "radiator".into(),
+            second: "case".into(),
+            output: PathBuf::from("/fake/hwmon5/pwm1"),
+        }));
+    }
+
+    #[test]
+    fn physical_conflicts_match_outputs_not_aliases() {
+        let config = valid();
+        let entry = |id: &str, dir: &str, index: u32| {
+            let fan = config.fans.iter().find(|f| f.id == id).unwrap();
+            let output = OutputRef {
+                chip_path: PathBuf::from(format!("/fake/{dir}")),
+                index,
+            };
+            (fan, output)
+        };
+        // Distinct outputs: nothing to report.
+        let ok = [entry("radiator", "hwmon5", 1), entry("pump", "hwmon5", 2)];
+        assert!(physical_conflicts(&ok).is_empty());
+        // Same index on another chip is a different output.
+        let other_chip = [entry("pump", "hwmon5", 2), entry("case", "hwmon6", 2)];
+        assert!(physical_conflicts(&other_chip).is_empty());
+        // A fan listed before the pump is still caught, with the right names.
+        let fan_first = [entry("case", "hwmon5", 2), entry("pump", "hwmon5", 2)];
+        assert_eq!(
+            physical_conflicts(&fan_first),
+            [ResolveError::PumpOutputClaimed {
+                fan: "case".into(),
+                pump: "pump".into(),
+                output: PathBuf::from("/fake/hwmon5/pwm2"),
+            }]
+        );
+    }
+
+    #[test]
+    fn missing_pump_chip_is_an_error() {
+        let mut config = valid();
+        config.chips.insert("aio".into(), "nct6798".into());
+        fan_mut(&mut config, "pump").chip = "aio".into();
+        let chips = [chip("hwmon2", "k10temp"), chip("hwmon5", "it8689")];
+        let errors = resolve(&config, &chips).unwrap_err();
+        assert!(errors.contains(&ResolveError::ChipNotFound {
+            alias: "aio".into(),
+            name: "nct6798".into(),
+        }));
+    }
+
+    #[test]
+    fn unused_alias_for_a_missing_chip_is_still_allowed() {
+        let mut config = valid();
+        config.chips.insert("spare".into(), "nct6798".into());
+        let chips = [chip("hwmon2", "k10temp"), chip("hwmon5", "it8689")];
+        assert!(resolve(&config, &chips).is_ok());
+    }
+
+    #[test]
+    fn resolve_change_applies_the_physical_checks() {
+        let chips = [chip("hwmon2", "k10temp"), chip("hwmon5", "it8689_61030507")];
+        let current = resolve(&valid(), &chips).unwrap();
+        let err = resolve_change(&current, &aliased_pump_config("it8689"), &chips).unwrap_err();
+        let LiveChangeError::Resolve(errors) = err else {
+            panic!("expected resolve errors, got {err:?}");
+        };
+        assert!(errors.contains(&ResolveError::PumpOutputClaimed {
+            fan: "case".into(),
+            pump: "pump".into(),
+            output: PathBuf::from("/fake/hwmon5/pwm2"),
+        }));
+
+        let mut curve_changed = valid();
+        fan_mut(&mut curve_changed, "case").curve = Some(vec![(30.0, 25.0), (80.0, 100.0)]);
+        assert!(resolve_change(&current, &curve_changed, &chips).is_ok());
+    }
+
+    #[test]
+    fn restore_outputs_skip_pumps_reached_through_another_alias() {
+        let chips = [chip("hwmon2", "k10temp"), chip("hwmon5", "it8689_61030507")];
+        let (outputs, errors) = restore_outputs(&aliased_pump_config("it8689_61030507"), &chips);
+        assert!(errors.is_empty());
+        let ids: Vec<&str> = outputs.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids, ["radiator"]);
+    }
+
+    #[test]
+    fn restore_outputs_skip_every_chip_an_ambiguous_pump_could_be_on() {
+        // "it8689" matches both chips; the fan's alias picks one of them.
+        let chips = [
+            chip("hwmon2", "k10temp"),
+            chip("hwmon4", "it8689"),
+            chip("hwmon5", "it8689_61030507"),
+        ];
+        let (outputs, _) = restore_outputs(&aliased_pump_config("it8689_61030507"), &chips);
+        assert!(outputs.iter().all(|(id, _)| id != "case"));
     }
 
     #[test]

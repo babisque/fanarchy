@@ -90,6 +90,8 @@ An AIO or custom-loop pump must never be slowed down. Find it (usually the heade
 
 A pump entry has no curve, sensor or speed settings, and the daemon never writes to it. It's listed only so its RPM shows up and so it can't be added as a fan by mistake.
 
+Every entry is checked against the physical output it resolves to, not just its alias: the daemon refuses to start (or reload) if a fan ends up on a pump's output, if two entries share an output, or if two aliases in `chips` point to the same chip. Give each chip one alias.
+
 If a header's tachometer isn't `fanN_input` with the same `N` as its `pwmN`, set `"rpm_input": N` to read the right one (works for pumps and fans).
 
 ### 2. Add your fans
