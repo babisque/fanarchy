@@ -1,0 +1,102 @@
+name: Hardware report
+description: Tell us how Fanarchy works (or doesn't) on your motherboard. This builds the compatibility list.
+title: "[Hardware]: "
+labels: ["hardware"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Fanarchy has only been tested on a few boards, so every report helps, including "it just works".
+        Everything below is read-only: none of these commands changes your fans.
+
+  - type: dropdown
+    id: result
+    attributes:
+      label: Result
+      options:
+        - Works (fans follow their curves, pump untouched)
+        - Partly works (some outputs or readings are wrong)
+        - Doesn't work (no PWM outputs, or the daemon refuses to start)
+    validations:
+      required: true
+
+  - type: input
+    id: board
+    attributes:
+      label: Motherboard
+      description: Brand and model.
+      placeholder: ASUS TUF GAMING B650-PLUS
+    validations:
+      required: true
+
+  - type: input
+    id: cpu
+    attributes:
+      label: CPU
+      placeholder: AMD Ryzen 7 5700X
+    validations:
+      required: true
+
+  - type: dropdown
+    id: driver
+    attributes:
+      label: Sensor driver
+      options:
+        - Community it87 (DKMS, frankcrawford/it87)
+        - Mainline it87
+        - nct6775 (Nuvoton)
+        - Other / not sure
+    validations:
+      required: true
+
+  - type: input
+    id: modprobe
+    attributes:
+      label: Module options
+      description: "Any options you had to set for the driver (for example `ignore_resource_conflict=1`). Write \"none\" if you didn't set any."
+      placeholder: none
+    validations:
+      required: true
+
+  - type: textarea
+    id: sensors
+    attributes:
+      label: sensors
+      description: "Output of `sensors`"
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: init
+    attributes:
+      label: fanarchyctl init --stdout
+      description: "Output of `fanarchyctl init --stdout` (read-only, writes nothing)."
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: mapping
+    attributes:
+      label: Output mapping
+      description: Which pwmN drives which header? Which one is the pump, if any? Did any fanN tachometer belong to a different pwmN (rpm_input)?
+      placeholder: |
+        pwm1 -> CPU_FAN (radiator fans)
+        pwm2 -> CPU_OPT (AIO pump, marked "role": "pump")
+        pwm3 -> SYS_FAN1 (case fans)
+    validations:
+      required: true
+
+  - type: textarea
+    id: status
+    attributes:
+      label: fanarchyctl status (if the daemon runs)
+      description: "Output of `fanarchyctl status`"
+      render: text
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: Anything else, such as BIOS settings you changed, odd readings, or workarounds.

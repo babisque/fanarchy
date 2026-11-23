@@ -1,0 +1,130 @@
+name: Bug report
+description: Something in the daemon, the CLI or the plugin doesn't work as documented.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report this.
+
+        **If a pump was controlled, a fan stopped, or temperatures ran away**, stop the daemon first
+        (`sudo systemctl stop fanarchyd`, which hands the fans back to the BIOS), then fill in this form.
+        If you think it is a security problem, please report it privately instead (see the links on the previous page).
+
+  - type: dropdown
+    id: impact
+    attributes:
+      label: Impact
+      options:
+        - Unsafe behaviour (pump touched, fan stopped, no fallback to full speed)
+        - Daemon doesn't start or crashes
+        - Wrong readings (temperature, RPM, speed)
+        - Plugin (bar widget or panel) doesn't work
+        - Something else
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you see, and what did you expect instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open the panel
+        2. Select "Case fans"
+        3. Drag the first point to 30 °C
+        4. ...
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Fanarchy version
+      description: "Output of `pacman -Q fanarchy fanarchy-git 2>/dev/null`"
+      placeholder: fanarchy 1.0.1-1
+    validations:
+      required: true
+
+  - type: input
+    id: board
+    attributes:
+      label: Motherboard
+      description: Brand and model.
+      placeholder: Gigabyte B550M AORUS ELITE
+    validations:
+      required: true
+
+  - type: input
+    id: system
+    attributes:
+      label: Kernel and Omarchy version
+      description: "Output of `uname -r`, plus your Omarchy version."
+      placeholder: 6.17.8-arch1-1, Omarchy 4.1
+    validations:
+      required: true
+
+  - type: dropdown
+    id: driver
+    attributes:
+      label: Sensor driver
+      description: Which driver exposes your fan controller?
+      options:
+        - Community it87 (DKMS, frankcrawford/it87)
+        - Mainline it87
+        - nct6775 (Nuvoton)
+        - Other / not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: status
+    attributes:
+      label: fanarchyctl status
+      description: "Output of `fanarchyctl status`. Write \"daemon not running\" if it can't connect."
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Config
+      description: "Contents of `/etc/fanarchy/config.json`, and the output of `sudo fanarchyd check-config`."
+      render: json
+    validations:
+      required: true
+
+  - type: textarea
+    id: daemon-log
+    attributes:
+      label: Daemon log
+      description: "Output of `journalctl -u fanarchyd -b --no-pager | tail -100`"
+      render: text
+
+  - type: textarea
+    id: shell-log
+    attributes:
+      label: Shell log (plugin problems only)
+      description: |
+        Output of `journalctl --user -b | grep -i -E "qml|fanarchy" | tail -50`.
+        After updating the plugin, run `omarchy restart shell` before testing: a plugin rescan keeps the old QML in the cache.
+      render: text
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I read the "Known issues" section of the README.
+          required: true
+        - label: I searched the existing issues and this hasn't been reported yet.
+          required: true

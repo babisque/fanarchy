@@ -1,0 +1,40 @@
+name: Feature request
+description: Suggest an idea for the daemon, the CLI or the plugin.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: Describe the situation, not the solution yet.
+      placeholder: When I game, my GPU heats the case but the case fans only follow the CPU...
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: What would you like to happen?
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Daemon (curves, safety, sensors)
+        - CLI (fanarchyctl)
+        - Bar widget
+        - Panel / curve editor
+        - Packaging and install
+        - Docs
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+      description: Workarounds you use today, or how another tool (FanControl, CoolerControl...) handles it.

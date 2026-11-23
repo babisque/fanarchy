@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security problem
+    url: https://github.com/babisque/fanarchy/security/advisories/new
+    about: Report a way the daemon could touch a pump or another output it shouldn't, privately.
+  - name: Install and configuration guide
+    url: https://github.com/babisque/fanarchy#readme
+    about: Setup steps, privilege boundary and known issues (it87 driver).
