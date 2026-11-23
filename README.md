@@ -16,6 +16,10 @@ Fanarchy is fan control for [Omarchy](https://omarchy.org): a small root daemon 
 
 ![The Fanarchy bar widget and the open panel](preview.png)
 
+A setup wizard in the panel takes the fans over. It always starts by marking the pump, so the pump can't be slowed down by mistake:
+
+![Setup wizard, step 1: MARK THE PUMP](docs/assets/setup-step1.png)
+
 <img src="design/logo-animated.gif" alt="" width="160" align="right">
 
 It has three parts:
@@ -41,6 +45,8 @@ The package does **not** enable or start the daemon, and the starter config cont
 1. Let your user talk to the daemon: `sudo usermod -aG fanarchy "$USER"`, then log out and back in.
 2. Start it: `sudo systemctl enable --now fanarchyd`. With the starter config it only reads sensors.
 3. Open the Fanarchy panel and press **START SETUP**: mark the pump first, pick and name the fans to control, check and apply. The daemon validates the setup, saves it and takes the fans over without a restart. **SETUP** in the panel footer reopens the wizard later.
+
+![The whole setup, from START SETUP to "setup applied"](docs/assets/setup-demo.gif)
 
 Prefer the terminal? `fanarchyctl outputs` lists the same outputs, and you can edit `/etc/fanarchy/config.json` by hand instead (see [Configuration](#configuration)), check it with `fanarchyd check-config` and apply it with `fanarchyctl reload`.
 
@@ -149,6 +155,10 @@ options it87 ignore_resource_conflict=1
 ### `pwmN` reads are meaningless in automatic mode
 
 Some chips (the IT8689E included) report garbage in `pwmN` while `pwmN_enable` is `2`, so `sensors` may show odd percentages for fans the BIOS controls. Trust the RPM. Details in [`docs/hardware-notes.md`](docs/hardware-notes.md).
+
+## Supported hardware
+
+Fanarchy works with any board whose fan headers show up as `pwmN` outputs under `hwmon`. The boards that have been tested are listed in [`docs/hardware.md`](docs/hardware.md). To add yours, open a [Hardware report](https://github.com/babisque/fanarchy/issues/new?template=hardware_report.yml) issue.
 
 ## Dependencies and services
 
