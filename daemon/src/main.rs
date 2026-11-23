@@ -36,7 +36,10 @@ enum Command {
     },
     /// Validate a config file and check it against the detected hardware
     /// (read-only).
-    CheckConfig { path: PathBuf },
+    CheckConfig {
+        #[arg(default_value = CONFIG_PATH)]
+        path: PathBuf,
+    },
     /// Set pwm_enable back to automatic for every `role: fan` output in
     /// the config. Used as the systemd ExecStopPost hook.
     Restore {
@@ -195,4 +198,40 @@ fn init_logging() {
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .init();
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    fn parse(args: &[&str]) -> Command {
+        Cli::try_parse_from(args).unwrap().command
+    }
+
+    #[test]
+    fn check_config_defaults_to_the_daemon_config() {
+        let Command::CheckConfig { path } = parse(&["fanarchyd", "check-config"]) else {
+            panic!("expected check-config");
+        };
+        assert_eq!(path, PathBuf::from(CONFIG_PATH));
+    }
+
+    #[test]
+    fn check_config_takes_an_explicit_path() {
+        let Command::CheckConfig { path } = parse(&["fanarchyd", "check-config", "/tmp/x.json"])
+        else {
+            panic!("expected check-config");
+        };
+        assert_eq!(path, PathBuf::from("/tmp/x.json"));
+    }
+
+    #[test]
+    fn run_and_check_config_share_the_default() {
+        let Command::Run { config, .. } = parse(&["fanarchyd", "run"]) else {
+            panic!("expected run");
+        };
+        assert_eq!(config, PathBuf::from(CONFIG_PATH));
+    }
 }

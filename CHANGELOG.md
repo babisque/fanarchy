@@ -5,6 +5,13 @@ All notable changes to Fanarchy are listed here. The format follows
 [Semantic Versioning](https://semver.org/). Any change to the socket protocol
 (`docs/protocol.md`) or the config schema is a major version.
 
+## [Unreleased]
+
+### Changed
+
+- `fanarchyd check-config` takes the path as optional and defaults to
+  `/etc/fanarchy/config.json`, like `fanarchyd run`.
+
 ## [1.0.1] - 2026-11-23
 
 ### Security

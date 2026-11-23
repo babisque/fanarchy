@@ -39,7 +39,7 @@ Coming soon: `yay -S fanarchy` will replace the first line once the AUR package 
 The package does **not** enable or start the daemon, and the starter config controls **no** fans. Before starting it:
 
 1. Edit `/etc/fanarchy/config.json`: mark the pump first, then add the fans you want controlled (see [Configuration](#configuration)).
-2. Check it: `fanarchyd check-config /etc/fanarchy/config.json`
+2. Check it: `fanarchyd check-config` (reads `/etc/fanarchy/config.json`; pass a path to check another file)
 3. Let your user talk to the daemon: `sudo usermod -aG fanarchy "$USER"`, then log out and back in.
 4. Start it: `sudo systemctl enable --now fanarchyd`
 
@@ -119,7 +119,7 @@ A full example is in [`examples/config.example.json`](examples/config.example.js
 ### 3. Check, start, adjust
 
 ```sh
-fanarchyd check-config /etc/fanarchy/config.json   # validates it against your hardware, read-only
+fanarchyd check-config                              # validates /etc/fanarchy/config.json against your hardware, read-only
 sudo systemctl enable --now fanarchyd
 fanarchyctl status                                  # live temperatures, RPM and speeds
 fanarchyctl set-curve case 30:25,60:50,80:100       # or drag the points in the panel
