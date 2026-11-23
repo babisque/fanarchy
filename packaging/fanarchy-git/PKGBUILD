@@ -14,6 +14,7 @@ optdepends=('nvidia-utils: GPU temperatures in the status'
             'lm_sensors: the sensors command, to find your fans and pump')
 provides=("$_pkgname")
 conflicts=("$_pkgname")
+options=('!debug')
 install=fanarchy.install
 source=("$_pkgname::git+$url.git")
 sha256sums=('SKIP')

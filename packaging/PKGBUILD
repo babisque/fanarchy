@@ -11,6 +11,7 @@ depends=('gcc-libs' 'glibc')
 makedepends=('cargo')
 optdepends=('nvidia-utils: GPU temperatures in the status'
             'lm_sensors: the sensors command, to find your fans and pump')
+options=('!debug')
 install=fanarchy.install
 source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
 # Filled in from the release tarball when the version is tagged.
