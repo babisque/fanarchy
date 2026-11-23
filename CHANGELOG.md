@@ -30,7 +30,6 @@ additive changes (new commands or optional fields) are minor.
   uses it too, so adding, removing or moving fans no longer needs a restart.
 - The empty-state **START SETUP** button opens the wizard instead of showing
   `fanarchyctl init`.
-
 - `fanarchyd check-config` takes the path as optional and defaults to
   `/etc/fanarchy/config.json`, like `fanarchyd run`.
 
