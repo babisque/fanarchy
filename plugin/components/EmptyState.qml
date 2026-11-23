@@ -76,9 +76,10 @@ Item {
       font.pixelSize: Theme.empty.line
     }
 
-    // The command in a dashed code box.
+    // The command in a dashed code box (none for START SETUP).
     Item {
       Layout.fillWidth: true
+      visible: root.copy.command !== ""
       implicitHeight: code.implicitHeight + 24
 
       Rectangle {
@@ -111,7 +112,7 @@ Item {
       scale: buttonMouse.pressed ? Theme.bar.pressScale : 1
 
       Accessible.role: Accessible.Button
-      Accessible.name: root.copy.button + ": " + root.copy.command
+      Accessible.name: root.copy.command !== "" ? root.copy.button + ": " + root.copy.command : root.copy.button
       Accessible.onPressAction: root.action()
 
       Behavior on color { ColorAnimation { duration: Theme.motion.duration; easing.type: Easing.InOutQuad } }

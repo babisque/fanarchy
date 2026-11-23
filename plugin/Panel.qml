@@ -10,6 +10,7 @@ import "models/theme.js" as Theme
 import "models/panel.js" as Panel
 import "models/curve.js" as Curve
 import "models/FanarchyClient.js" as Client
+import "models/setup.js" as Setup
 import "components"
 
 // Fanarchy panel: a drawer on the right edge with one card per fan, the
@@ -32,6 +33,13 @@ Item {
   property real lastDismissMs: -1
   property string screenName: ""          // monitor whose widget opened the panel
 
+  // Setup wizard (specs/08-setup-wizard.md). Read-only until APPLY.
+  property bool wizardOpen: false
+  property var setupDraft: null           // setup.js draft, built from list_outputs
+  property var starterCurve: []           // list_outputs starter_curve
+  property bool applyInFlight: false
+  property string wizardError: ""
+
   readonly property var clientState: live.clientState
   readonly property var status: clientState.status
   readonly property string panelState: Panel.panelState(clientState.connected, status)
@@ -39,6 +47,7 @@ Item {
   readonly property var savedCurve: Panel.curveOf(config, selectedId)
   readonly property var cards: panelState === "pending" ? Panel.placeholderCards() : Panel.fanCards(status, config)
   readonly property var temps: Panel.headerTemps(status)
+  readonly property string body: Panel.body(panelState, wizardOpen)
 
   // ------------------------------------------------------------ shell API
 
@@ -67,6 +76,7 @@ Item {
     root.opened = false
     root.errorText = ""
     root.confirmText = ""
+    root.closeWizard()
   }
 
   function toggle() {
@@ -123,6 +133,50 @@ Item {
     commands.send(Client.setModeRequest(root.selectedId, "fixed", percent))
   }
 
+  // ------------------------------------------------------------ wizard
+
+  // Always a fresh draft, starting at the pump step.
+  function openWizard() {
+    root.setupDraft = null
+    root.wizardError = ""
+    root.errorText = ""
+    root.applyInFlight = false
+    root.wizardOpen = true
+    commands.send(Client.listOutputsRequest())
+  }
+
+  // Discards the draft; nothing was written.
+  function closeWizard() {
+    root.wizardOpen = false
+    root.setupDraft = null
+    root.wizardError = ""
+    root.applyInFlight = false
+  }
+
+  function refreshOutputs() {
+    if (!root.wizardOpen || !commands.connected) return
+    if (Client.isPending(commands.pending, "list_outputs")) return
+    commands.send(Client.listOutputsRequest())
+  }
+
+  function editDraft(next) {
+    root.wizardError = ""
+    root.setupDraft = next
+  }
+
+  function wizardBack() {
+    if (root.setupDraft && root.setupDraft.step > 1) root.editDraft(Setup.back(root.setupDraft))
+    else root.closeWizard()
+  }
+
+  function applySetup() {
+    if (!root.setupDraft || root.applyInFlight) return
+    var body = Setup.payload(root.setupDraft, root.starterCurve)
+    root.wizardError = ""
+    root.applyInFlight = true
+    commands.send(Client.applySetupRequest(body.pumps, body.fans))
+  }
+
   function copyCommand(command) {
     Quickshell.clipboardText = command
     root.showConfirmation(Panel.confirmation({ cmd: "copy" }))
@@ -140,6 +194,30 @@ Item {
   }
 
   function handleReply(request, ok, data, error) {
+    if (request.cmd === "list_outputs") {
+      if (!root.wizardOpen) return
+      if (!ok) {
+        root.wizardError = error
+        return
+      }
+      root.starterCurve = Curve.copy(data.starter_curve)
+      root.setupDraft = root.setupDraft
+          ? Setup.mergeOutputs(root.setupDraft, data.outputs, root.config)
+          : Setup.initialDraft(data.outputs, root.config)
+      return
+    }
+    if (request.cmd === "apply_setup") {
+      root.applyInFlight = false
+      if (ok) {
+        root.config = data
+        root.closeWizard()
+        root.showConfirmation(Panel.confirmation(request))
+      } else {
+        // Stay on step 3 with the draft intact.
+        root.wizardError = error
+      }
+      return
+    }
     if (request.cmd === "get_config") {
       if (ok) {
         root.config = data
@@ -185,6 +263,14 @@ Item {
   onSelectedIdChanged: root.resetDraft()
   onSavedCurveChanged: root.resetDraft()
   onOpenedChanged: if (!opened) root.pendingMode = null
+
+  // Live RPM while the wizard is open (list_outputs only reads).
+  Timer {
+    interval: Setup.REFRESH_MS
+    repeat: true
+    running: root.wizardOpen && root.opened
+    onTriggered: root.refreshOutputs()
+  }
 
   Timer {
     id: confirmTimer
@@ -337,19 +423,47 @@ Item {
           EmptyState {
             id: emptyState
             Layout.fillWidth: true
-            visible: root.panelState === "down" || root.panelState === "empty"
+            visible: root.body === "empty"
             fonts: fontSet
             copy: Panel.emptyState(root.panelState, live.view.downReason)
             onAction: {
+              if (Panel.emptyAction(root.panelState) === "setup") {
+                root.openWizard()
+                return
+              }
               root.copyCommand(emptyState.copy.command)
               emptyState.flashDone()
             }
           }
 
+          SetupWizard {
+            Layout.fillWidth: true
+            visible: root.body === "wizard"
+            draft: root.setupDraft
+            starter: root.starterCurve
+            config: root.config
+            status: root.status
+            fonts: fontSet
+            errorText: root.wizardError
+            busy: root.applyInFlight
+            onPumpToggled: function(key) { root.editDraft(Setup.togglePump(root.setupDraft, key)) }
+            onNoPumpChosen: root.editDraft(Setup.chooseNoPump(root.setupDraft))
+            onControlToggled: function(key) {
+              var sensor = Setup.defaultSensor(Setup.sensorOptions(root.config, root.status))
+              root.editDraft(Setup.toggleControl(root.setupDraft, key, sensor))
+            }
+            onFieldChanged: function(key, field, value) {
+              root.editDraft(Setup.setField(root.setupDraft, key, field, value))
+            }
+            onBackRequested: root.wizardBack()
+            onNextRequested: root.editDraft(Setup.next(root.setupDraft))
+            onApplyRequested: root.applySetup()
+          }
+
           // Fans.
           ColumnLayout {
             Layout.fillWidth: true
-            visible: root.panelState === "ready" || root.panelState === "pending"
+            visible: root.body === "fans"
             spacing: Theme.card.gap
 
             Repeater {
@@ -381,7 +495,7 @@ Item {
 
           CurveEditor {
             Layout.fillWidth: true
-            visible: root.panelState === "ready" || root.panelState === "pending"
+            visible: root.body === "fans"
             fonts: fontSet
             interactive: root.panelState === "ready" && !root.curveInFlight
             title: Panel.editorTitle(root.selectedFan)
@@ -395,7 +509,7 @@ Item {
 
           ModeSelector {
             Layout.fillWidth: true
-            visible: root.panelState === "ready" || root.panelState === "pending"
+            visible: root.body === "fans"
             fonts: fontSet
             interactive: root.panelState === "ready"
             mode: Panel.displayMode(root.selectedFan, root.pendingMode)
@@ -408,7 +522,7 @@ Item {
           // The daemon's message, as is, when it refuses a change.
           Rectangle {
             Layout.fillWidth: true
-            visible: root.errorText !== ""
+            visible: root.errorText !== "" && root.body !== "wizard"
             implicitHeight: errorLabel.implicitHeight + 20
             color: Theme.colors.inkRaised
 
@@ -461,6 +575,31 @@ Item {
                 color: Theme.colors.ash
                 font.family: fontSet.mono
                 font.pixelSize: Theme.footer.text
+              }
+
+              // Reopens the wizard, pre-filled with the current config.
+              Text {
+                id: setupLink
+                visible: Panel.showSetupButton(root.panelState, root.wizardOpen)
+                text: "SETUP"
+                color: setupMouse.containsMouse ? Theme.colors.paper : Theme.colors.ash
+                font.family: fontSet.stencil
+                font.weight: Theme.fonts.stencil.weight
+                font.pixelSize: Theme.modes.text
+                font.letterSpacing: 1
+
+                Accessible.role: Accessible.Button
+                Accessible.name: "Setup"
+                Accessible.onPressAction: root.openWizard()
+
+                MouseArea {
+                  id: setupMouse
+                  anchors.fill: parent
+                  anchors.margins: -12
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: root.openWizard()
+                }
               }
 
               Rectangle {

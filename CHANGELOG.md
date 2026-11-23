@@ -2,12 +2,32 @@
 
 All notable changes to Fanarchy are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
-[Semantic Versioning](https://semver.org/). Any change to the socket protocol
-(`docs/protocol.md`) or the config schema is a major version.
+[Semantic Versioning](https://semver.org/). A breaking change to the socket
+protocol (`docs/protocol.md`) or the config schema is a major version;
+additive changes (new commands or optional fields) are minor.
 
 ## [Unreleased]
 
+### Added
+
+- Setup wizard in the panel. **START SETUP** (and **SETUP** in the footer
+  later) walks through marking the pump, picking and naming the fans, and a
+  review with each fan's starter curve. **APPLY** sends it to the daemon, so
+  `/etc/fanarchy/config.json` no longer has to be edited by hand.
+- Socket commands `list_outputs` (every PWM output on the configured chips,
+  with live readings and what it is assigned to) and `apply_setup` (replace
+  the `fans` list; `chips` and `safety` never change through the socket).
+  A pump can only be removed by root, by editing the config file.
+- `fanarchyctl outputs` lists the same outputs as a table.
+
 ### Changed
+
+- The daemon re-plans controlled outputs at runtime: new fans are taken over
+  with the safe-PWM-first sequence, removed ones are handed back to their
+  original `pwmN_enable`, and any failure rolls everything back. `reload`
+  uses it too, so adding, removing or moving fans no longer needs a restart.
+- The empty-state **START SETUP** button opens the wizard instead of showing
+  `fanarchyctl init`.
 
 - `fanarchyd check-config` takes the path as optional and defaults to
   `/etc/fanarchy/config.json`, like `fanarchyd run`.

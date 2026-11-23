@@ -27,13 +27,15 @@ pub const SUBSCRIBE_INTERVAL_SECS: u64 = 2;
 pub type CurvePoint = (f32, f32);
 
 /// Every `cmd` the daemon understands, in protocol order.
-pub const COMMANDS: [&str; 6] = [
+pub const COMMANDS: [&str; 8] = [
     "status",
     "get_config",
     "set_curve",
     "set_mode",
     "reload",
     "subscribe",
+    "list_outputs",
+    "apply_setup",
 ];
 
 /// A request line sent to the daemon.
@@ -61,6 +63,118 @@ pub enum Request {
     Reload,
     /// Receive `status` now and every [`SUBSCRIBE_INTERVAL_SECS`].
     Subscribe,
+    /// Every `pwmN` output on the configured chips (since 1.1.0).
+    ListOutputs,
+    /// Replace the config's `fans` list (fans and pumps). `chips` and
+    /// `safety` never change through the socket (since 1.1.0).
+    ApplySetup {
+        pumps: Vec<SetupPump>,
+        fans: Vec<SetupFan>,
+    },
+}
+
+/// A pump in an `apply_setup` request.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetupPump {
+    pub id: String,
+    pub label: String,
+    /// A chip alias already in the config.
+    pub chip: String,
+    pub pwm: u32,
+}
+
+/// A controlled fan in an `apply_setup` request.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetupFan {
+    pub id: String,
+    pub label: String,
+    /// A chip alias already in the config.
+    pub chip: String,
+    pub pwm: u32,
+    /// `"<chip alias>/tempN"`.
+    pub sensor: String,
+    pub min_percent: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rpm_input: Option<u32>,
+    /// The daemon's starter curve (clamped to `min_percent`) when left out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub curve: Option<Vec<CurvePoint>>,
+}
+
+/// `data` of a `list_outputs` response.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OutputList {
+    /// The curve a newly added fan starts with, before `min_percent`.
+    pub starter_curve: Vec<CurvePoint>,
+    pub outputs: Vec<OutputInfo>,
+}
+
+/// One `pwmN` output on a configured chip.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OutputInfo {
+    /// The chip alias from the config.
+    pub chip: String,
+    pub pwm: u32,
+    /// The `pwmN` file, for display only (valid for this boot).
+    pub path: String,
+    /// `None` when `pwmN_enable` is missing or unreadable.
+    pub mode: Option<OutputMode>,
+    /// Current duty in %. `None` when unreadable.
+    pub percent: Option<u8>,
+    /// Reading of `fanN_input` with the same `N`, when it exists.
+    pub rpm: Option<u32>,
+    /// The tachometer read by default (same `N`) when `fanN_input`
+    /// exists, otherwise `None`.
+    pub rpm_input: Option<u32>,
+    pub assigned: Assignment,
+}
+
+/// `pwmN_enable`, by name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OutputMode {
+    Manual,
+    Automatic,
+    /// `0`: no control, full speed.
+    Full,
+}
+
+impl From<PwmMode> for OutputMode {
+    fn from(mode: PwmMode) -> Self {
+        match mode {
+            PwmMode::Disabled => OutputMode::Full,
+            PwmMode::Manual => OutputMode::Manual,
+            PwmMode::Automatic(_) => OutputMode::Automatic,
+        }
+    }
+}
+
+impl OutputMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OutputMode::Manual => "manual",
+            OutputMode::Automatic => "automatic",
+            OutputMode::Full => "full",
+        }
+    }
+}
+
+/// What the config does with an output.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Assignment {
+    pub kind: AssignedKind,
+    /// The config id. `None` when `kind` is `none`.
+    pub id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AssignedKind {
+    Fan,
+    Pump,
+    None,
 }
 
 impl Request {
@@ -84,7 +198,8 @@ impl Request {
         // `deny_unknown_fields` does not cover variants without fields.
         if let Some(object) = value.as_object()
             && let Some(extra) = object.keys().find(|key| {
-                key.as_str() != "cmd" && !matches!(cmd.as_str(), "set_curve" | "set_mode")
+                key.as_str() != "cmd"
+                    && !matches!(cmd.as_str(), "set_curve" | "set_mode" | "apply_setup")
             })
         {
             return Err(format!("invalid {cmd} request: unknown field `{extra}`"));
@@ -264,6 +379,33 @@ mod tests {
             ),
             (r#"{"cmd":"reload"}"#, Request::Reload),
             (r#"{"cmd":"subscribe"}"#, Request::Subscribe),
+            (r#"{"cmd":"list_outputs"}"#, Request::ListOutputs),
+            (
+                r#"{"cmd":"apply_setup","pumps":[{"id":"pump","label":"AIO pump","chip":"board","pwm":2}],"fans":[{"id":"case","label":"Case fans","chip":"board","pwm":3,"sensor":"cpu/temp1","min_percent":20,"rpm_input":3,"curve":[[40,30],[60,50],[75,80],[85,100]]}]}"#,
+                Request::ApplySetup {
+                    pumps: vec![SetupPump {
+                        id: "pump".into(),
+                        label: "AIO pump".into(),
+                        chip: "board".into(),
+                        pwm: 2,
+                    }],
+                    fans: vec![SetupFan {
+                        id: "case".into(),
+                        label: "Case fans".into(),
+                        chip: "board".into(),
+                        pwm: 3,
+                        sensor: "cpu/temp1".into(),
+                        min_percent: 20,
+                        rpm_input: Some(3),
+                        curve: Some(vec![
+                            (40.0, 30.0),
+                            (60.0, 50.0),
+                            (75.0, 80.0),
+                            (85.0, 100.0),
+                        ]),
+                    }],
+                },
+            ),
         ];
         for (line, expected) in cases {
             assert_eq!(Request::parse(line), Ok(expected), "{line}");
@@ -309,6 +451,30 @@ mod tests {
                 r#"{"cmd":"set_mode","fan":"case","mode":"fixed","percent":300}"#,
                 "invalid set_mode request",
             ),
+            (
+                r#"{"cmd":"list_outputs","chip":"board"}"#,
+                "invalid list_outputs request: unknown field `chip`",
+            ),
+            (
+                r#"{"cmd":"apply_setup","pumps":[],"fans":[],"chips":{}}"#,
+                "invalid apply_setup request: unknown field `chips`",
+            ),
+            (
+                r#"{"cmd":"apply_setup","pumps":[],"fans":[],"safety":{}}"#,
+                "invalid apply_setup request: unknown field `safety`",
+            ),
+            (
+                r#"{"cmd":"apply_setup","pumps":[{"id":"p","label":"P","chip":"board","pwm":2,"role":"fan"}],"fans":[]}"#,
+                "invalid apply_setup request: unknown field `role`",
+            ),
+            (
+                r#"{"cmd":"apply_setup","pumps":[],"fans":[{"id":"c","label":"C","chip":"board","pwm":3,"sensor":"cpu/temp1","min_percent":20,"path":"/sys"}]}"#,
+                "invalid apply_setup request: unknown field `path`",
+            ),
+            (
+                r#"{"cmd":"apply_setup","fans":[]}"#,
+                "invalid apply_setup request: missing field `pumps`",
+            ),
         ];
         for (line, expected) in cases {
             let err = Request::parse(line).unwrap_err();
@@ -349,6 +515,43 @@ mod tests {
         assert_eq!(value["role"], "fan");
         let back: FanStatus = serde_json::from_value(value).unwrap();
         assert_eq!(back, fan);
+    }
+
+    #[test]
+    fn output_info_matches_the_spec() {
+        let info = OutputInfo {
+            chip: "board".into(),
+            pwm: 3,
+            path: "/sys/class/hwmon/hwmon1/pwm3".into(),
+            mode: Some(OutputMode::from(PwmMode::Manual)),
+            percent: Some(40),
+            rpm: Some(793),
+            rpm_input: Some(3),
+            assigned: Assignment {
+                kind: AssignedKind::Fan,
+                id: Some("case".into()),
+            },
+        };
+        let value = serde_json::to_value(&info).unwrap();
+        assert_eq!(
+            value,
+            json!({
+                "chip": "board", "pwm": 3, "path": "/sys/class/hwmon/hwmon1/pwm3",
+                "mode": "manual", "percent": 40, "rpm": 793, "rpm_input": 3,
+                "assigned": {"kind": "fan", "id": "case"}
+            })
+        );
+        let back: OutputInfo = serde_json::from_value(value).unwrap();
+        assert_eq!(back, info);
+        assert_eq!(OutputMode::from(PwmMode::Disabled), OutputMode::Full);
+        assert_eq!(
+            OutputMode::from(PwmMode::Automatic(5)),
+            OutputMode::Automatic
+        );
+        assert_eq!(
+            serde_json::to_value(AssignedKind::None).unwrap(),
+            json!("none")
+        );
     }
 
     #[test]

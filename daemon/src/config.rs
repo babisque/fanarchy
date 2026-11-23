@@ -289,7 +289,8 @@ pub enum ResolveError {
     Invalid(ValidationError),
 }
 
-/// Why a new config cannot replace the running one (`reload`, `set_curve`).
+/// Why a new config cannot replace the running one (`reload`, `set_curve`,
+/// `apply_setup`).
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum LiveChangeError {
     #[error("config does not match the hardware: {}", semicolon_list(.0))]
@@ -442,6 +443,19 @@ pub fn same_outputs(old: &Plan, new: &Plan) -> bool {
         plan.fans.iter().map(|fan| fan.output.clone()).collect()
     };
     old.fans.len() == new.fans.len() && outputs(old) == outputs(new)
+}
+
+/// Keep the original `pwmN_enable` of outputs `current` already controls.
+///
+/// A plan resolved while the daemon runs reads `1` (manual) for those,
+/// since the daemon switched them; restoring that would leave the fan
+/// stuck. The value read before the first takeover is kept instead.
+pub fn carry_original_modes(current: &Plan, new: &mut Plan) {
+    for fan in &mut new.fans {
+        if let Some(old) = current.fans.iter().find(|old| old.output == fan.output) {
+            fan.original_mode = old.original_mode;
+        }
+    }
 }
 
 /// Check a new config before it replaces the running one: every rule of
@@ -1700,6 +1714,43 @@ mod tests {
             Err(ConfigError::Write { .. })
         ));
         assert_eq!(fs::read_to_string(&path).unwrap(), "old");
+    }
+
+    #[test]
+    fn carry_original_modes_keeps_values_read_before_takeover() {
+        let chips = [chip("hwmon2", "k10temp"), chip("hwmon5", "it8689")];
+        let current = resolve(&valid(), &chips).unwrap();
+
+        // Now the daemon controls pwm1 and pwm3: they read manual.
+        let mut controlled = chips.clone();
+        for pwm in &mut controlled[1].pwms {
+            pwm.mode = Some(PwmMode::Manual);
+        }
+        let mut moved = valid();
+        fan_mut(&mut moved, "case").pwm = 4;
+        controlled[1].pwms.push(PwmOutput {
+            index: 4,
+            value: Some(0),
+            mode: Some(PwmMode::Automatic(5)),
+        });
+        let mut new = resolve(&moved, &controlled).unwrap();
+        assert!(
+            new.fans
+                .iter()
+                .all(|f| f.original_mode != PwmMode::Automatic(2))
+        );
+
+        carry_original_modes(&current, &mut new);
+        assert_eq!(
+            new.fans[0].original_mode,
+            PwmMode::Automatic(2),
+            "kept output"
+        );
+        assert_eq!(
+            new.fans[1].original_mode,
+            PwmMode::Automatic(5),
+            "new output"
+        );
     }
 
     #[test]

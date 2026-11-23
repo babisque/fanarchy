@@ -42,9 +42,10 @@ document describes the same messages.
 
 ## Requests
 
-Fans are always addressed by their config `id`. No request takes a path,
-a chip or a `pwmN` number. A `pump` output can never be controlled:
-requests for a pump are refused with
+Fans are always addressed by their config `id`. Only `apply_setup` names
+a chip alias and a `pwmN` number, and only for chips root already
+declared in `chips`; no request takes a path. A `pump` output can never
+be controlled: requests for a pump are refused with
 `fan '<id>' is a pump and cannot be controlled`.
 
 Unknown fields are rejected (`invalid set_curve request: unknown field
@@ -110,7 +111,7 @@ Returns the config the daemon is running with, in the same format as
   fan is taken back for that, then handed to the motherboard again once
   it clears.
 - The mode is **not saved**. Every fan goes back to `curve` when the
-  daemon restarts or on `reload`.
+  daemon restarts, on `reload` and on `apply_setup`.
 
 ### `reload`
 
@@ -118,17 +119,102 @@ Returns the config the daemon is running with, in the same format as
 {"cmd":"reload"}
 ```
 
-Re-reads and validates the config file and applies it. The new file may
-change curves, sensors, `min_percent`, smoothing and safety settings.
-
-It refuses a file that changes which outputs are controlled (chips, `pwm`
-numbers, roles, added or removed fans) with:
-
-```
-controlled outputs changed; restart the daemon (sudo systemctl restart fanarchyd)
-```
+Re-reads and validates the config file and applies it, with the same
+rules as at startup. Since 1.1.0 the new file may also change which
+outputs are controlled (added, removed or moved fans and pumps); they are
+re-planned live, as described under [`apply_setup`](#apply_setup). Before
+1.1.0 such a file was refused with `controlled outputs changed; restart
+the daemon (sudo systemctl restart fanarchyd)`.
 
 On any error the daemon keeps running the previous config.
+
+### `list_outputs`
+
+*Since 1.1.0.*
+
+```json
+{"cmd":"list_outputs"}
+```
+
+Lists every `pwmN` output on the chips declared in the config's `chips`,
+in alias order. Read-only: nothing is written. Readings are from the
+daemon's last tick (at most a second old).
+
+```json
+{
+  "starter_curve": [[40.0, 30.0], [60.0, 50.0], [75.0, 80.0], [85.0, 100.0]],
+  "outputs": [
+    {
+      "chip": "board",
+      "pwm": 3,
+      "path": "/sys/class/hwmon/hwmon1/pwm3",
+      "mode": "manual",
+      "percent": 40,
+      "rpm": 793,
+      "rpm_input": 3,
+      "assigned": {"kind": "fan", "id": "case"}
+    }
+  ]
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `starter_curve` | the curve a new fan starts with, before it is raised to the fan's `min_percent`. Defined by the daemon only. |
+| `chip` | the chip alias from the config |
+| `path` | the `pwmN` file, for display. Valid for this boot only. |
+| `mode` | `pwmN_enable`: `manual`, `automatic` or `full` (`0`). `null` when unreadable. |
+| `percent` | current duty cycle in %, `null` when unreadable |
+| `rpm` | `fanN_input` with the same `N`, `null` when there is none |
+| `rpm_input` | the tachometer the daemon reads by default (the same `N`) when `fanN_input` exists, otherwise `null` |
+| `assigned` | the config entry on this output: `kind` is `fan`, `pump` or `none`; `id` is `null` for `none` |
+
+A chip that is missing or matches more than one device lists no outputs.
+
+### `apply_setup`
+
+*Since 1.1.0.*
+
+```json
+{"cmd":"apply_setup",
+ "pumps":[{"id":"pump","label":"AIO pump","chip":"board","pwm":2}],
+ "fans":[{"id":"case","label":"Case fans","chip":"board","pwm":3,
+          "sensor":"cpu/temp1","min_percent":20,"rpm_input":3,
+          "curve":[[40,30],[60,50],[75,80],[85,100]]}]}
+```
+
+Replaces the config's `fans` list (fans and pumps) and nothing else.
+`chips`, `safety` and `version` are never changed through the socket, and
+the request has no fields for them.
+
+- `pumps[]`: `id`, `label`, `chip`, `pwm`.
+- `fans[]`: `id`, `label`, `chip`, `pwm`, `sensor`, `min_percent`, plus
+  optional `rpm_input` (left out of the file when it equals `pwm`) and
+  `curve` (the starter curve, raised to `min_percent`, when left out).
+  `hysteresis_c`, `step_up_percent` and `step_down_percent` are kept from
+  the fan with the same `id`, if there was one.
+- Every pump already in the config must be sent again with the same `id`,
+  `chip` and `pwm`. Leaving one out, moving it, or sending a fan with its
+  `id` or output is refused with:
+
+  ```
+  pump 'pump' can only be removed by editing the config file as root
+  ```
+
+- The new config is checked with the same rules as the config file
+  (schema, then the hardware: chips, `pwmN`, sensors, one alias per chip,
+  no two entries on one physical output, no fan on a pump's output).
+- If it is valid, the daemon switches to it without a restart:
+  - new fan outputs are taken over with the same sequence as at startup
+    (safe duty first, then manual mode), with every safety rule applied;
+  - outputs that are no longer fans go back to their original
+    `pwmN_enable`, as on shutdown;
+  - unchanged outputs keep running and are not written. Their mode goes
+    back to `curve`.
+- Then the config is saved atomically. If any step fails, every step is
+  undone, the previous config keeps running and the file is unchanged.
+
+Returns the new config, like `get_config`.
 
 ### `subscribe`
 
@@ -212,3 +298,7 @@ show `NaN` for them.
 Messages and fields are never renamed or removed once published. New
 optional fields and new commands may be added, so clients must ignore
 fields they do not know.
+
+| Version | Change |
+| --- | --- |
+| 1.1.0 | added `list_outputs` and `apply_setup`; `reload` applies changes to the controlled outputs |

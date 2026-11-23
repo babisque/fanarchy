@@ -10,4 +10,5 @@ pub mod gpu;
 pub mod hwmon;
 pub mod ipc;
 pub mod safety;
+pub mod setup;
 pub mod status;

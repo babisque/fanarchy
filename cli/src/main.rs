@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
-use fanarchy_protocol::table::{render_fans, render_status};
-use fanarchy_protocol::{CurvePoint, FanMode, Request, Response, SOCKET_PATH, Status};
+use fanarchy_protocol::table::{render_fans, render_outputs, render_status};
+use fanarchy_protocol::{CurvePoint, FanMode, OutputList, Request, Response, SOCKET_PATH, Status};
 use serde_json::Value;
 
 mod init;
@@ -37,6 +37,9 @@ enum Command {
     Status,
     /// Print the config the daemon is running with.
     Config,
+    /// List every PWM output on the configured chips and what it is
+    /// assigned to (read-only).
+    Outputs,
     /// Replace a fan's curve (applied now and saved to the config).
     SetCurve {
         /// Fan id from the config, e.g. `case`.
@@ -113,6 +116,12 @@ fn run(cli: &Cli) -> Result<()> {
             );
             println!();
             print!("{}", render_fans(&status.fans));
+        }
+        Command::Outputs => {
+            let data = request(&cli.socket, &Request::ListOutputs)?;
+            let list: OutputList =
+                serde_json::from_value(data).context("unexpected outputs from the daemon")?;
+            print!("{}", render_outputs(&list));
         }
         Command::Config => {
             let data = request(&cli.socket, &Request::GetConfig)?;
@@ -298,5 +307,8 @@ mod tests {
         let cli =
             Cli::try_parse_from(["fanarchyctl", "--socket", "/tmp/x.sock", "status"]).unwrap();
         assert_eq!(cli.socket, PathBuf::from("/tmp/x.sock"));
+
+        let cli = Cli::try_parse_from(["fanarchyctl", "outputs"]).unwrap();
+        assert!(matches!(cli.command, Command::Outputs));
     }
 }

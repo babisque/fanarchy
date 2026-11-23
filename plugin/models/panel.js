@@ -141,6 +141,7 @@ function confirmation(request) {
     return "✓ following the curve"
   }
   if (request.cmd === "copy") return "✓ copied"
+  if (request.cmd === "apply_setup") return "✓ setup applied"
   return ""
 }
 
@@ -168,8 +169,8 @@ function emptyState(kind, downReason) {
   if (kind === "empty") {
     return {
       headline: "NOTHING TO REBEL AGAINST. YET.",
-      line: "No fans are under your control. Scan the hardware, name your fans and mark the pump.",
-      command: "fanarchyctl init",
+      line: "No fans are under your control. Mark the pump, pick your fans, apply.",
+      command: "",
       button: "START SETUP"
     }
   }
@@ -213,6 +214,25 @@ function withCurve(config, fanId, points) {
     if (next.fans[i] && next.fans[i].id === fanId) next.fans[i].curve = JSON.parse(JSON.stringify(points))
   }
   return next
+}
+
+// Which body the panel shows: "wizard", "empty" (empty or down state) or
+// "fans" (cards, curve editor and modes).
+function body(panelState, wizardOpen) {
+  if (panelState === "down") return "empty"
+  if (wizardOpen) return "wizard"
+  return panelState === "empty" ? "empty" : "fans"
+}
+
+// The footer SETUP button: once the daemon is up and fans exist (the
+// empty state has its own START SETUP).
+function showSetupButton(panelState, wizardOpen) {
+  return panelState === "ready" && !wizardOpen
+}
+
+// What the empty state's button does: open the wizard, or copy the command.
+function emptyAction(panelState) {
+  return panelState === "empty" ? "setup" : "copy"
 }
 
 function footerText(connected) {

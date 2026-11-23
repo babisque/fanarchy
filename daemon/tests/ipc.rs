@@ -46,10 +46,23 @@ fn example_text() -> String {
     fs::read_to_string(path).unwrap()
 }
 
+/// What `fanarchyctl init` writes for the fixture: nothing controlled.
+const EMPTY_CONFIG: &str = r#"{
+  "version": 1,
+  "chips": { "board": "it8689", "cpu": "k10temp" },
+  "fans": [],
+  "safety": { "critical_temp_c": 85, "sensor_fail_percent": 100, "cpu_sensor": "cpu/temp1" }
+}
+"#;
+
 async fn start() -> Daemon {
+    start_with(&example_text()).await
+}
+
+async fn start_with(config_text: &str) -> Daemon {
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("config.json");
-    fs::write(&config_path, example_text()).unwrap();
+    fs::write(&config_path, config_text).unwrap();
     let socket = dir.path().join("fanarchy.sock");
     // A group the test user owns, standing in for `fanarchy`.
     let gid = fs::metadata(dir.path()).unwrap().gid();
@@ -377,7 +390,7 @@ async fn set_mode_is_applied_but_not_saved() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn reload_applies_changes_but_not_new_outputs() {
+async fn reload_applies_changes_and_new_outputs() {
     let daemon = start().await;
     let mut client = daemon.client().await;
     let text = example_text();
@@ -392,13 +405,14 @@ async fn reload_applies_changes_but_not_new_outputs() {
         json!([[30.0, 50.0], [80.0, 100.0]])
     );
 
+    // Moving a fan to another output is applied live: pwm3 goes back to
+    // the motherboard and pwm4 is taken over.
     let moved = new_curve.replace("\"pwm\": 3", "\"pwm\": 4");
     fs::write(&daemon.config_path, &moved).unwrap();
-    let response = client.call(json!({"cmd": "reload"})).await;
-    assert_eq!(
-        error_of(&response),
-        "controlled outputs changed; restart the daemon (sudo systemctl restart fanarchyd)"
-    );
+    assert_ok(&client.call(json!({"cmd": "reload"})).await);
+    assert_eq!(daemon.board("pwm3_enable"), "2");
+    assert_eq!(daemon.board("pwm4_enable"), "1");
+    assert_eq!(daemon.board("pwm1_enable"), "1");
 
     fs::write(&daemon.config_path, "{ not json").unwrap();
     let response = client.call(json!({"cmd": "reload"})).await;
@@ -414,7 +428,7 @@ async fn reload_applies_changes_but_not_new_outputs() {
 
     // Still running the last good config.
     let config = client.call(json!({"cmd": "get_config"})).await;
-    assert_eq!(config["data"]["fans"][2]["pwm"], 3);
+    assert_eq!(config["data"]["fans"][2]["pwm"], 4);
     assert_eq!(
         config["data"]["fans"][2]["curve"],
         json!([[30.0, 50.0], [80.0, 100.0]])
@@ -460,6 +474,262 @@ async fn reload_rejects_a_fan_aliased_onto_the_pump() {
         assert!(!write.file().starts_with("hwmon5/pwm2"), "wrote {write:?}");
     }
     assert_eq!(daemon.board("pwm2_enable"), "2");
+    daemon.shutdown().await;
+}
+
+fn setup_request(pumps: Value, fans: Value) -> Value {
+    json!({"cmd": "apply_setup", "pumps": pumps, "fans": fans})
+}
+
+fn example_pump() -> Value {
+    json!({"id": "pump", "label": "AIO pump", "chip": "board", "pwm": 2})
+}
+
+/// The two fans of `examples/config.example.json`, as the wizard sends them.
+fn example_fans() -> Value {
+    json!([
+        {"id": "radiator", "label": "Radiator fans", "chip": "board", "pwm": 1,
+         "sensor": "cpu/temp1", "min_percent": 25, "rpm_input": 1,
+         "curve": [[40, 30], [60, 50], [75, 80], [85, 100]]},
+        {"id": "case", "label": "Case fans", "chip": "board", "pwm": 3,
+         "sensor": "cpu/temp1", "min_percent": 20,
+         "curve": [[40, 25], [65, 45], [80, 100]]}
+    ])
+}
+
+fn assert_pump_untouched(daemon: &Daemon) {
+    for write in daemon.hw.writes() {
+        assert!(!write.file().starts_with("hwmon5/pwm2"), "wrote {write:?}");
+    }
+    assert_eq!(daemon.board("pwm2_enable"), "2");
+}
+
+#[tokio::test(start_paused = true)]
+async fn list_outputs_reports_every_pwm_on_the_configured_chips() {
+    let daemon = start().await;
+    let mut client = daemon.client().await;
+    // Readings come from the last tick, the first one after the takeover.
+    wait_ticks(1).await;
+    let response = client.call(json!({"cmd": "list_outputs"})).await;
+    assert_ok(&response);
+    let data = &response["data"];
+    assert_eq!(
+        data["starter_curve"],
+        json!([[40.0, 30.0], [60.0, 50.0], [75.0, 80.0], [85.0, 100.0]])
+    );
+    let outputs = data["outputs"].as_array().unwrap();
+    assert_eq!(outputs.len(), 5);
+
+    let pwm1 = &outputs[0];
+    assert_eq!(pwm1["chip"], "board");
+    assert_eq!(pwm1["pwm"], 1);
+    assert!(
+        pwm1["path"].as_str().unwrap().ends_with("/hwmon5/pwm1"),
+        "{pwm1}"
+    );
+    assert_eq!(pwm1["mode"], "manual");
+    assert_eq!(pwm1["rpm"], 1477);
+    assert_eq!(pwm1["rpm_input"], 1);
+    assert_eq!(pwm1["assigned"], json!({"kind": "fan", "id": "radiator"}));
+
+    let pwm2 = &outputs[1];
+    assert_eq!(pwm2["mode"], "automatic");
+    assert_eq!(pwm2["assigned"], json!({"kind": "pump", "id": "pump"}));
+
+    let pwm4 = &outputs[3];
+    assert_eq!(pwm4["percent"], 0);
+    assert_eq!(pwm4["rpm"], Value::Null);
+    assert_eq!(pwm4["rpm_input"], Value::Null);
+    assert_eq!(pwm4["assigned"], json!({"kind": "none", "id": null}));
+    daemon.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn list_outputs_writes_nothing() {
+    let daemon = start_with(EMPTY_CONFIG).await;
+    let mut client = daemon.client().await;
+    for _ in 0..3 {
+        assert_ok(&client.call(json!({"cmd": "list_outputs"})).await);
+        wait_ticks(1).await;
+    }
+    assert_eq!(daemon.hw.writes(), Vec::new());
+    daemon.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn apply_setup_from_an_empty_config_matches_the_example() {
+    let daemon = start_with(EMPTY_CONFIG).await;
+    let mut client = daemon.client().await;
+    let response = client
+        .call(setup_request(json!([example_pump()]), example_fans()))
+        .await;
+    assert_ok(&response);
+
+    // Answered with the new config, which is what get_config and the file say.
+    let config = client.call(json!({"cmd": "get_config"})).await;
+    assert_eq!(response["data"], config["data"]);
+    let saved: Value = serde_json::from_slice(&daemon.config_bytes()).unwrap();
+    assert_eq!(saved, config["data"]);
+    assert_eq!(saved["chips"], json!({"board": "it8689", "cpu": "k10temp"}));
+    assert_eq!(saved["fans"][0]["role"], "pump");
+    assert_eq!(saved["fans"][1]["id"], "radiator");
+    assert_eq!(saved["fans"][1].get("rpm_input"), None);
+    assert_eq!(saved["fans"][2]["min_percent"], 20);
+
+    // Same behaviour as the example config.
+    let example = config::parse(&example_text()).unwrap();
+    let applied = config::parse(&String::from_utf8(daemon.config_bytes()).unwrap()).unwrap();
+    for id in ["radiator", "case", "pump"] {
+        let a = applied.fans.iter().find(|f| f.id == id).unwrap();
+        let e = example.fans.iter().find(|f| f.id == id).unwrap();
+        assert_eq!(
+            (a.pwm, a.role, &a.sensor, &a.curve, a.min_percent),
+            (e.pwm, e.role, &e.sensor, &e.curve, e.min_percent),
+            "{id}"
+        );
+    }
+
+    assert_eq!(daemon.board("pwm1_enable"), "1");
+    assert_eq!(daemon.board("pwm3_enable"), "1");
+    wait_ticks(2).await;
+    let status = client.call(json!({"cmd": "status"})).await;
+    let fans = status["data"]["fans"].as_array().unwrap();
+    assert_eq!(fans.len(), 3);
+    assert_eq!(fans[1]["mode"], "curve");
+    assert_pump_untouched(&daemon);
+
+    // The new fans are handed back on shutdown, like the ones from startup.
+    let hw = Arc::clone(&daemon.hw);
+    daemon.shutdown().await;
+    assert_eq!(hw.fake.read(BOARD, "pwm1_enable"), "2");
+    assert_eq!(hw.fake.read(BOARD, "pwm3_enable"), "2");
+    assert_eq!(hw.fake.read(BOARD, "pwm2_enable"), "2");
+}
+
+#[tokio::test(start_paused = true)]
+async fn apply_setup_hands_removed_fans_back_and_keeps_the_others() {
+    let daemon = start().await;
+    let mut client = daemon.client().await;
+    wait_ticks(2).await;
+    daemon.hw.clear_writes();
+
+    let radiator = example_fans()[0].clone();
+    let response = client
+        .call(setup_request(json!([example_pump()]), json!([radiator])))
+        .await;
+    assert_ok(&response);
+    assert_eq!(response["data"]["fans"].as_array().unwrap().len(), 2);
+    assert_eq!(daemon.board("pwm3_enable"), "2");
+    assert_eq!(daemon.board("pwm1_enable"), "1");
+    for write in daemon.hw.writes() {
+        assert!(
+            !write.file().starts_with("hwmon5/pwm1"),
+            "rewrote a kept fan: {write:?}"
+        );
+    }
+    let saved: Value = serde_json::from_slice(&daemon.config_bytes()).unwrap();
+    assert_eq!(saved["fans"].as_array().unwrap().len(), 2);
+    assert_pump_untouched(&daemon);
+    daemon.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn apply_setup_refusals_change_nothing() {
+    let daemon = start().await;
+    let mut client = daemon.client().await;
+    let before = daemon.config_bytes();
+    let pump_error = "pump 'pump' can only be removed by editing the config file as root";
+
+    // Pump left out.
+    let response = client.call(setup_request(json!([]), example_fans())).await;
+    assert_eq!(error_of(&response), pump_error);
+
+    // Pump turned into a fan.
+    let mut fans = example_fans();
+    fans.as_array_mut().unwrap().push(json!({
+        "id": "pump", "label": "AIO pump", "chip": "board", "pwm": 2,
+        "sensor": "cpu/temp1", "min_percent": 50
+    }));
+    let response = client.call(setup_request(json!([]), fans)).await;
+    assert_eq!(error_of(&response), pump_error);
+
+    // A chip root did not declare.
+    let mut fans = example_fans();
+    fans[1]["chip"] = json!("gpu");
+    let response = client
+        .call(setup_request(json!([example_pump()]), fans))
+        .await;
+    assert_eq!(
+        error_of(&response),
+        "invalid setup: fan 'case': unknown chip alias 'gpu'"
+    );
+
+    // An output the chip does not have.
+    let mut fans = example_fans();
+    fans[1]["pwm"] = json!(9);
+    let response = client
+        .call(setup_request(json!([example_pump()]), fans))
+        .await;
+    assert_eq!(
+        error_of(&response),
+        "config does not match the hardware: fan 'case': it8689_61030507 has no pwm9"
+    );
+
+    // chips and safety cannot be sent.
+    let mut request = setup_request(json!([example_pump()]), example_fans());
+    request["chips"] = json!({"board": "nct6775"});
+    let response = client.call(request).await;
+    let error = error_of(&response);
+    assert!(
+        error.starts_with("invalid apply_setup request: unknown field `chips`"),
+        "{error}"
+    );
+
+    assert_eq!(daemon.config_bytes(), before);
+    let config = client.call(json!({"cmd": "get_config"})).await;
+    assert_eq!(config["data"]["fans"].as_array().unwrap().len(), 3);
+    assert_eq!(daemon.board("pwm1_enable"), "1");
+    assert_eq!(daemon.board("pwm3_enable"), "1");
+    assert_pump_untouched(&daemon);
+    daemon.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn apply_setup_rolls_back_when_a_takeover_fails() {
+    let daemon = start().await;
+    let mut client = daemon.client().await;
+    let before = daemon.config_bytes();
+    daemon.hw.fail_writes_to("hwmon5/pwm4_enable");
+
+    // Drop pwm3, add pwm4: the takeover of pwm4 fails.
+    let fans = json!([
+        example_fans()[0].clone(),
+        {"id": "rear", "label": "Rear", "chip": "board", "pwm": 4,
+         "sensor": "cpu/temp1", "min_percent": 30}
+    ]);
+    let response = client
+        .call(setup_request(json!([example_pump()]), fans))
+        .await;
+    let error = error_of(&response);
+    assert!(
+        error.starts_with("fan 'rear': cannot take control of the output"),
+        "{error}"
+    );
+
+    // Nothing changed: same file, pwm3 still controlled, pwm4 untouched.
+    assert_eq!(daemon.config_bytes(), before);
+    assert_eq!(daemon.board("pwm3_enable"), "1");
+    assert_eq!(daemon.board("pwm4_enable"), "2");
+    wait_ticks(2).await;
+    let status = client.call(json!({"cmd": "status"})).await;
+    let ids: Vec<&str> = status["data"]["fans"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["radiator", "pump", "case"]);
+    assert_pump_untouched(&daemon);
     daemon.shutdown().await;
 }
 

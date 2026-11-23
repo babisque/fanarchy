@@ -7,8 +7,8 @@
 
 use std::future::Future;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use fanarchy_protocol::{FanMode, Request, Response};
@@ -22,6 +22,7 @@ use crate::config::{
 use crate::curve::{self, CurvePoint};
 use crate::hwmon::{Chip, Hwmon, HwmonError, OutputRef, PwmMode};
 use crate::safety::{self, Duty, Override};
+use crate::setup;
 
 /// Time between two control ticks.
 pub const TICK: Duration = Duration::from_secs(1);
@@ -51,6 +52,8 @@ pub enum ControlError {
     ProtectedOutput { fan: String, output: PathBuf },
     #[error("fan '{fan}': refusing to write {}, it is not in the plan", .output.display())]
     OutsidePlan { fan: String, output: PathBuf },
+    #[error("fan '{fan}': cannot hand the output back to the motherboard")]
+    Release { fan: String },
 }
 
 fn bullet_list<T: std::fmt::Display>(items: &[T]) -> String {
@@ -449,6 +452,137 @@ impl<H: Hwmon> Controller<H> {
     }
 }
 
+impl<H: Hwmon> Controller<H> {
+    /// Resolve a config against the hardware with every rule checked at
+    /// startup, keeping the original `pwmN_enable` of the outputs already
+    /// under control (see [`config::carry_original_modes`]). Writes nothing.
+    pub fn resolve(&self, config: &Config) -> Result<Plan, String> {
+        let chips = self.hwmon.chips().map_err(|e| e.to_string())?;
+        let mut plan = config::resolve(config, &chips)
+            .map_err(|errors| LiveChangeError::Resolve(errors).to_string())?;
+        config::carry_original_modes(&self.plan, &mut plan);
+        Ok(plan)
+    }
+
+    /// Switch to a plan that may control other outputs, without a restart.
+    ///
+    /// - Outputs only in `plan` are taken over with the same safe-PWM-first
+    ///   sequence as at startup, at the duty the safety rules give.
+    /// - Outputs only in the current plan are handed back to their
+    ///   original `pwmN_enable`, like on shutdown.
+    /// - Outputs in both keep running and are not written; their mode goes
+    ///   back to [`Mode::Curve`].
+    ///
+    /// `restorer` covers the outputs of both plans while the switch is
+    /// under way, then only those of the active plan. On any failure every
+    /// step is undone, the current plan keeps running and the error is
+    /// returned.
+    pub fn replan(&mut self, plan: Plan, restorer: &Restorer<H>) -> Result<(), ControlError> {
+        let chips = self.hwmon.chips()?;
+        restorer.track(&[&self.plan, &plan]);
+        let result = self.switch_outputs(&plan, &chips);
+        match result {
+            Ok(fans) => {
+                restorer.track(&[&plan]);
+                self.fans = fans;
+                self.plan = plan;
+                Ok(())
+            }
+            Err(err) => {
+                restorer.track(&[&self.plan]);
+                Err(err)
+            }
+        }
+    }
+
+    /// The hardware side of [`Controller::replan`]: new runtimes for
+    /// `plan`, or an error after undoing every write.
+    fn switch_outputs(&self, plan: &Plan, chips: &[Chip]) -> Result<Vec<FanRuntime>, ControlError> {
+        let hwmon = self.hwmon.as_ref();
+        let cpu = read_sensor(chips, &plan.cpu_sensor);
+
+        // Take over the new outputs first, so a failure only has to hand
+        // them back.
+        let mut taken: Vec<&ControlledFan> = Vec::new();
+        let mut fans = Vec::with_capacity(plan.fans.len());
+        for fan in &plan.fans {
+            if let Some(index) = self.position_of(&fan.output) {
+                fans.push(FanRuntime {
+                    mode: Mode::Curve,
+                    ..self.fans[index]
+                });
+                continue;
+            }
+            let temp = read_sensor(chips, &fan.sensor);
+            let (state, duty) = step(fan, &plan.safety, &FanState::default(), cpu, temp);
+            log_override_change(fan, plan, Override::None, state.over, cpu, temp);
+            if let Err(err) = take_control(hwmon, plan, fan, duty) {
+                tracing::error!(fan = %fan.id, %err, "cannot take the new fan over, undoing the setup");
+                release_all(hwmon, &taken);
+                return Err(err);
+            }
+            taken.push(fan);
+            fans.push(FanRuntime {
+                state,
+                mode: Mode::Curve,
+                written: Some(duty),
+                released: false,
+                temp_c: temp,
+            });
+        }
+
+        // Then hand back the outputs that are no longer fans.
+        let mut released: Vec<usize> = Vec::new();
+        for (index, fan) in self.plan.fans.iter().enumerate() {
+            if plan.controls(&fan.output) {
+                continue;
+            }
+            if plan.is_protected(&fan.output) {
+                tracing::warn!(fan = %fan.id, "output becomes a pump, handing it back to the motherboard");
+            }
+            released.push(index);
+            let mode = restore_mode(fan.original_mode);
+            if !restore_output(hwmon, &fan.id, &fan.output, mode) {
+                tracing::error!(fan = %fan.id, "cannot release the fan, undoing the setup");
+                self.retake(&released);
+                release_all(hwmon, &taken);
+                return Err(ControlError::Release {
+                    fan: fan.id.clone(),
+                });
+            }
+            tracing::info!(fan = %fan.id, "fan handed back to the motherboard (removed from the config)");
+        }
+        Ok(fans)
+    }
+
+    fn position_of(&self, output: &OutputRef) -> Option<usize> {
+        self.plan.fans.iter().position(|fan| &fan.output == output)
+    }
+
+    /// Undo releases: take these fans of the current plan back, unless
+    /// the motherboard was already driving them (`auto` mode).
+    fn retake(&self, indexes: &[usize]) {
+        for &index in indexes {
+            let fan = &self.plan.fans[index];
+            let runtime = &self.fans[index];
+            if runtime.released {
+                continue;
+            }
+            let duty = runtime.written.unwrap_or(Duty::FULL);
+            if let Err(err) = take_control(self.hwmon.as_ref(), &self.plan, fan, duty) {
+                tracing::error!(fan = %fan.id, %err, "cannot take the fan back, it stays with the motherboard");
+            }
+        }
+    }
+}
+
+/// Hand fans just taken over back to their original `pwmN_enable`.
+fn release_all<H: Hwmon>(hwmon: &H, fans: &[&ControlledFan]) {
+    for fan in fans {
+        restore_output(hwmon, &fan.id, &fan.output, restore_mode(fan.original_mode));
+    }
+}
+
 /// Carry out one fan's [`Action`]. Returns `false` on a hardware error.
 fn apply<H: Hwmon>(
     hwmon: &H,
@@ -626,44 +760,50 @@ pub fn restore_output<H: Hwmon>(hwmon: &H, fan: &str, output: &OutputRef, mode: 
 
 /// Puts every controlled `pwmN_enable` back to its original value.
 /// Runs at most once, whoever calls it first.
+///
+/// The outputs follow the active plan ([`Restorer::track`]), so fans
+/// added or removed at runtime are covered too.
 pub struct Restorer<H: Hwmon> {
     hwmon: Arc<H>,
-    outputs: Vec<(String, OutputRef, PwmMode)>,
+    outputs: Mutex<Vec<(String, OutputRef, PwmMode)>>,
     done: AtomicBool,
 }
 
 impl<H: Hwmon> Restorer<H> {
     pub fn new(hwmon: Arc<H>, plan: &Plan) -> Self {
-        let outputs = plan
-            .fans
-            .iter()
-            .filter(|fan| {
-                // Defence in depth: never restore (write) a pump's output.
-                let protected = plan.is_protected(&fan.output);
-                if protected {
-                    tracing::error!(fan = %fan.id, "output belongs to a pump, not restoring it");
-                }
-                !protected
-            })
-            .map(|fan| {
-                if fan.original_mode == PwmMode::Manual {
-                    tracing::warn!(
-                        fan = %fan.id,
-                        "original pwm_enable is manual (1), will restore automatic (2) instead"
-                    );
-                }
-                (
-                    fan.id.clone(),
-                    fan.output.clone(),
-                    restore_mode(fan.original_mode),
-                )
-            })
-            .collect();
+        for fan in &plan.fans {
+            if fan.original_mode == PwmMode::Manual {
+                tracing::warn!(
+                    fan = %fan.id,
+                    "original pwm_enable is manual (1), will restore automatic (2) instead"
+                );
+            }
+        }
         Self {
             hwmon,
-            outputs,
+            outputs: Mutex::new(restorable_outputs(&[plan])),
             done: AtomicBool::new(false),
         }
+    }
+
+    /// Restore the outputs of these plans from now on (several while
+    /// switching from one plan to another).
+    pub fn track(&self, plans: &[&Plan]) {
+        let outputs = restorable_outputs(plans);
+        *self.lock() = outputs;
+    }
+
+    /// The outputs it would restore: `(fan id, output, mode)`.
+    pub fn outputs(&self) -> Vec<(String, OutputRef, PwmMode)> {
+        self.lock().clone()
+    }
+
+    // A panic while the lock is held only ever interrupts a plain
+    // assignment, so the list is always whole: use it anyway.
+    fn lock(&self) -> MutexGuard<'_, Vec<(String, OutputRef, PwmMode)>> {
+        self.outputs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// Restore every output. Returns `false` if any could not be restored.
@@ -672,12 +812,37 @@ impl<H: Hwmon> Restorer<H> {
         if self.done.swap(true, Ordering::SeqCst) {
             return true;
         }
+        let outputs = self.outputs();
         let mut all_ok = true;
-        for (fan, output, mode) in &self.outputs {
+        for (fan, output, mode) in &outputs {
             all_ok &= restore_output(self.hwmon.as_ref(), fan, output, *mode);
         }
         all_ok
     }
+}
+
+/// Every fan output of these plans, once each, with the mode to restore.
+/// A fan on an output any of the plans gives to a pump is left out.
+fn restorable_outputs(plans: &[&Plan]) -> Vec<(String, OutputRef, PwmMode)> {
+    let mut outputs: Vec<(String, OutputRef, PwmMode)> = Vec::new();
+    for plan in plans {
+        for fan in &plan.fans {
+            // Defence in depth: never restore (write) a pump's output.
+            if plan.is_protected(&fan.output) {
+                tracing::error!(fan = %fan.id, "output belongs to a pump, not restoring it");
+                continue;
+            }
+            if outputs.iter().any(|(_, output, _)| output == &fan.output) {
+                continue;
+            }
+            outputs.push((
+                fan.id.clone(),
+                fan.output.clone(),
+                restore_mode(fan.original_mode),
+            ));
+        }
+    }
+    outputs
 }
 
 /// Restores on drop: covers normal returns, `?` errors and unwinding.
@@ -773,7 +938,11 @@ where
     let _guard = RestoreGuard(Arc::clone(&restorer));
 
     let mut controller = Controller::start(hwmon, plan)?;
-    let mut state = Daemon { config, service };
+    let mut state = Daemon {
+        config,
+        service,
+        restorer: Arc::clone(&restorer),
+    };
     let result = run_loop(&mut controller, &mut state, shutdown).await;
     if let Err(err) = &result {
         tracing::error!(%err, "control loop stopped");
@@ -783,13 +952,14 @@ where
 }
 
 /// The control loop's state besides the controller.
-struct Daemon {
+struct Daemon<H: Hwmon> {
     config: Config,
     service: Option<Service>,
+    restorer: Arc<Restorer<H>>,
 }
 
-impl Daemon {
-    fn publish<H: Hwmon>(&self, controller: &Controller<H>) {
+impl<H: Hwmon> Daemon<H> {
+    fn publish(&self, controller: &Controller<H>) {
         if let Some(service) = &self.service {
             service.published.send_replace(Some(Arc::new(Published {
                 config: self.config.clone(),
@@ -810,7 +980,7 @@ impl Daemon {
 /// between. A change applied over IPC triggers a tick right away.
 async fn run_loop<H, F>(
     controller: &mut Controller<H>,
-    state: &mut Daemon,
+    state: &mut Daemon<H>,
     shutdown: F,
 ) -> Result<(), ControlError>
 where
@@ -852,7 +1022,7 @@ where
 /// Apply one change request. Nothing changes when it returns an error.
 fn handle_request<H: Hwmon>(
     controller: &mut Controller<H>,
-    state: &mut Daemon,
+    state: &mut Daemon<H>,
     request: Request,
 ) -> Result<Response, String> {
     let Some(service) = &state.service else {
@@ -882,16 +1052,46 @@ fn handle_request<H: Hwmon>(
         }
         Request::Reload => {
             let config = config::load(&service.config_path).map_err(|e| e.one_line())?;
-            let plan = controller.check_change(&config)?;
+            let plan = controller.resolve(&config)?;
             for warning in config::warnings(&config) {
                 tracing::warn!("{warning}");
             }
-            controller.replace_plan(plan);
+            controller
+                .replan(plan, &state.restorer)
+                .map_err(|e| e.to_string())?;
             state.config = config;
             tracing::info!("config reloaded");
             Ok(Response::ok_empty())
         }
-        Request::Status | Request::GetConfig | Request::Subscribe => {
+        Request::ApplySetup { pumps, fans } => {
+            let config =
+                setup::build_config(&state.config, &pumps, &fans).map_err(|e| e.to_string())?;
+            let plan = controller.resolve(&config)?;
+            let previous = controller.plan().clone();
+            controller
+                .replan(plan, &state.restorer)
+                .map_err(|e| e.to_string())?;
+            if let Err(err) = config::save_atomic(&service.config_path, &config) {
+                tracing::error!(%err, "cannot save the setup, going back to the previous one");
+                if let Err(undo) = controller.replan(previous, &state.restorer) {
+                    tracing::error!(%undo, "cannot go back to the previous setup");
+                }
+                return Err(err.one_line());
+            }
+            for warning in config::warnings(&config) {
+                tracing::warn!("{warning}");
+            }
+            let response = serde_json::to_value(&config)
+                .map(Response::ok)
+                .map_err(|e| format!("cannot encode the response: {e}"))?;
+            state.config = config;
+            tracing::info!(
+                fans = controller.plan().fans.len(),
+                "setup applied and saved"
+            );
+            Ok(response)
+        }
+        Request::Status | Request::GetConfig | Request::Subscribe | Request::ListOutputs => {
             Err("this request is answered by the socket server".to_string())
         }
     }

@@ -115,6 +115,7 @@ test("confirmations for every accepted change", () => {
   assert.equal(Panel.confirmation(Client.setModeRequest("case", "auto")), "✓ BIOS in control");
   assert.equal(Panel.confirmation(Client.setModeRequest("case", "curve")), "✓ following the curve");
   assert.equal(Panel.confirmation({ cmd: "copy" }), "✓ copied");
+  assert.equal(Panel.confirmation(Client.applySetupRequest([], [])), "✓ setup applied");
   assert.equal(Panel.confirmation(null), "");
 });
 
@@ -146,8 +147,29 @@ test("empty state copy", () => {
   assert.equal(Panel.emptyState("down", "stopped").headline, "THE DAEMON STOPPED LISTENING.");
   assert.equal(Panel.emptyState("down", "permission").command, "sudo usermod -aG fanarchy $USER");
   const empty = plain(Panel.emptyState("empty"));
-  assert.equal(empty.command, "fanarchyctl init");
+  assert.equal(empty.command, "", "the wizard replaces the command");
   assert.equal(empty.button, "START SETUP");
+});
+
+test("START SETUP opens the wizard; the down states copy their command", () => {
+  assert.equal(Panel.emptyAction("empty"), "setup");
+  assert.equal(Panel.emptyAction("down"), "copy");
+});
+
+test("the wizard replaces the fan list while open", () => {
+  assert.equal(Panel.body("ready", false), "fans");
+  assert.equal(Panel.body("pending", false), "fans");
+  assert.equal(Panel.body("ready", true), "wizard");
+  assert.equal(Panel.body("empty", true), "wizard");
+  assert.equal(Panel.body("empty", false), "empty");
+  assert.equal(Panel.body("down", true), "empty", "a stopped daemon wins");
+});
+
+test("the footer SETUP button shows once fans exist and the wizard is closed", () => {
+  assert.equal(Panel.showSetupButton("ready", false), true);
+  assert.equal(Panel.showSetupButton("ready", true), false);
+  assert.equal(Panel.showSetupButton("empty", false), false);
+  assert.equal(Panel.showSetupButton("down", false), false);
 });
 
 test("cards split by kind", () => {

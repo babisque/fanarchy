@@ -36,12 +36,13 @@ omarchy plugin add https://github.com/babisque/fanarchy --enable  # bar widget +
 
 Coming soon: `yay -S fanarchy` will replace the first line once the AUR package is published.
 
-The package does **not** enable or start the daemon, and the starter config controls **no** fans. Before starting it:
+The package does **not** enable or start the daemon, and the starter config controls **no** fans. Then:
 
-1. Edit `/etc/fanarchy/config.json`: mark the pump first, then add the fans you want controlled (see [Configuration](#configuration)).
-2. Check it: `fanarchyd check-config` (reads `/etc/fanarchy/config.json`; pass a path to check another file)
-3. Let your user talk to the daemon: `sudo usermod -aG fanarchy "$USER"`, then log out and back in.
-4. Start it: `sudo systemctl enable --now fanarchyd`
+1. Let your user talk to the daemon: `sudo usermod -aG fanarchy "$USER"`, then log out and back in.
+2. Start it: `sudo systemctl enable --now fanarchyd`. With the starter config it only reads sensors.
+3. Open the Fanarchy panel and press **START SETUP**: mark the pump first, pick and name the fans to control, check and apply. The daemon validates the setup, saves it and takes the fans over without a restart. **SETUP** in the panel footer reopens the wizard later.
+
+Prefer the terminal? `fanarchyctl outputs` lists the same outputs, and you can edit `/etc/fanarchy/config.json` by hand instead (see [Configuration](#configuration)), check it with `fanarchyd check-config` and apply it with `fanarchyctl reload`.
 
 ## Privilege boundary
 
@@ -51,13 +52,14 @@ The package does **not** enable or start the daemon, and the starter config cont
 | --- | --- |
 | `/sys/class/hwmon/*/pwmN` and `pwmN_enable` | **Write**, only for outputs with `"role": "fan"` in the config |
 | `/sys/class/hwmon/*` (temperatures, fan RPM, chip names) | Read |
-| `/etc/fanarchy/config.json` | Read; written only when you save a curve from the panel or `fanarchyctl set-curve` |
+| `/etc/fanarchy/config.json` | Read; written only when you save a curve (panel or `fanarchyctl set-curve`) or apply the setup wizard. Only the `fans` list changes then; `chips` and `safety` are never written. |
 | `/run/fanarchy.sock` | Created by the daemon, owned `root:fanarchy`, mode `0660` (root only if the group is missing) |
 | `nvidia-smi` | Run read-only for GPU temperatures, if installed |
 
 What it never does:
 
 - Never writes to an output marked `"role": "pump"`, or to any output that isn't in the config.
+- Never removes a pump, or turns it into a fan, through the socket. Only root can, by editing the config file.
 - Never writes anything else under `/sys`, and never loads, installs or configures kernel modules.
 - Never sets a controlled fan to 0 %: every fan has a `min_percent` floor.
 
@@ -67,7 +69,7 @@ Safety rules, always on:
 - A temperature sensor can't be read: the fans that follow it go to `sensor_fail_percent` (100 % by default).
 - The daemon stops, crashes or is killed: every controlled fan is handed back to the motherboard (`pwmN_enable = 2`). The service's `ExecStopPost=fanarchyd restore` covers `SIGKILL` and OOM kills too.
 
-The systemd unit is sandboxed (`ProtectSystem=strict`, `ProtectHome`, `ReadWritePaths` limited to `/sys/class/hwmon`, `/etc/fanarchy` and `/run`). Anyone in the `fanarchy` group can change curves and modes through the socket, so only add users you trust with your fans.
+The systemd unit is sandboxed (`ProtectSystem=strict`, `ProtectHome`, `ReadWritePaths` limited to `/sys/class/hwmon`, `/etc/fanarchy` and `/run`). Anyone in the `fanarchy` group can change curves, modes and which outputs are controlled (on the chips root declared in `chips`) through the socket, so only add users you trust with your fans.
 
 ## Configuration
 
@@ -124,11 +126,11 @@ sudo systemctl enable --now fanarchyd
 fanarchyctl status                                  # live temperatures, RPM and speeds
 fanarchyctl set-curve case 30:25,60:50,80:100       # or drag the points in the panel
 fanarchyctl set-mode case auto                      # hand one fan back to the motherboard
-sudo systemctl restart fanarchyd                    # after changing which outputs are controlled
-fanarchyctl reload                                  # after editing curves or settings by hand
+fanarchyctl outputs                                 # every PWM output on your chips and what it is assigned to
+fanarchyctl reload                                  # after editing the config by hand
 ```
 
-`fanarchyctl reload` refuses a config that adds, removes or moves controlled outputs; restart the service for those.
+`fanarchyctl reload` applies the whole file without a restart: new fans are taken over safely and removed ones go back to the BIOS.
 
 ## Known issues
 

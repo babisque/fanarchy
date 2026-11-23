@@ -4,11 +4,12 @@
 //! `fanarchy` group can use it without root. It is never world-writable:
 //! without the group it falls back to `0600` (root only).
 //!
-//! `status`, `get_config` and `subscribe` are answered here from what the
-//! control loop publishes. Changes (`set_curve`, `set_mode`, `reload`) go
+//! `status`, `get_config`, `list_outputs` and `subscribe` are answered
+//! here from what the control loop publishes; none of them writes
+//! anything. Changes (`set_curve`, `set_mode`, `reload`, `apply_setup`) go
 //! to the control loop over a channel, which validates them with the
-//! same rules as the config file. No request names a path or a `pwmN`:
-//! fans are addressed by config id, and pumps are refused.
+//! same rules as the config file. Only `apply_setup` names a `pwmN`, and
+//! only on chips root declared in the config; pumps are refused.
 
 use std::fs;
 use std::io::ErrorKind;
@@ -27,6 +28,7 @@ pub use fanarchy_protocol::SOCKET_PATH;
 
 use crate::control::{ControlRequest, Published};
 use crate::gpu::GpuSensor;
+use crate::setup;
 use crate::status::{GpuReading, build_status};
 
 /// Group whose members may use the socket.
@@ -348,6 +350,13 @@ async fn respond(context: &Context, request: Request) -> Response {
         Request::Status => status_response(context),
         Request::GetConfig => match current(context) {
             Ok(published) => to_response(&published.config),
+            Err(response) => response,
+        },
+        Request::ListOutputs => match current(context) {
+            Ok(published) => to_response(&setup::list_outputs(
+                &published.config,
+                &published.snapshot.chips,
+            )),
             Err(response) => response,
         },
         change => forward(context, change).await,

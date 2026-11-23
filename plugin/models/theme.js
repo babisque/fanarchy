@@ -146,3 +146,27 @@ var empty = {
   button: 44,
   copiedMs: 1800
 }
+
+// Setup wizard (specs/08-setup-wizard.md, section 5).
+var wizard = {
+  stepLabel: 12,
+  title: 32,
+  rowName: 22,
+  rowMeta: 12,
+  rowRpm: 18,
+  note: 13,
+  gap: 12,
+  rowGap: 6,
+  toggleWidth: 92,
+  toggleHeight: 30,
+  toggleText: 14,
+  fieldLabel: 11,
+  field: 14,
+  fieldHeight: 34,
+  optionHeight: 30,
+  navHeight: 44,
+  navText: 20,
+  previewWidth: 132,
+  previewHeight: 56,
+  previewLine: 2
+}

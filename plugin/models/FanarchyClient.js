@@ -189,6 +189,26 @@ function setModeRequest(fanId, mode, percent) {
   return request
 }
 
+function listOutputsRequest() {
+  return { cmd: "list_outputs" }
+}
+
+// `pumps` and `fans` as built by setup.js payload().
+function applySetupRequest(pumps, fans) {
+  return {
+    cmd: "apply_setup",
+    pumps: JSON.parse(JSON.stringify(pumps || [])),
+    fans: JSON.parse(JSON.stringify(fans || []))
+  }
+}
+
+// Whether a request with this `cmd` is already waiting for its reply.
+function isPending(pending, cmd) {
+  var list = pending || []
+  for (var i = 0; i < list.length; i++) if (list[i] && list[i].cmd === cmd) return true
+  return false
+}
+
 // Replies cross from FanarchyCommands to the panel as JSON text: a `var`
 // signal argument goes through QVariant and its arrays come out as Qt
 // sequences, which Array.isArray() rejects. Text comes out as plain JS.

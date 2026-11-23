@@ -661,3 +661,168 @@ fn restore_from_config_skips_a_fan_aliased_onto_the_pump() {
     assert_eq!(report.restored, ["radiator"]);
     assert_pump_never_written(&hw);
 }
+
+/// The example config with the case fan on `pwm` instead of pwm3.
+fn moved_case(pwm: u32) -> Config {
+    let mut config = example_config();
+    config.fans[2].pwm = pwm;
+    config
+}
+
+fn board_writes(hw: &RecordingHwmon, prefix: &str) -> Vec<Write> {
+    hw.writes()
+        .into_iter()
+        .filter(|w| {
+            let file = w.file();
+            file == format!("{BOARD}/{prefix}") || file == format!("{BOARD}/{prefix}_enable")
+        })
+        .collect()
+}
+
+#[test]
+fn replan_takes_new_outputs_over_and_hands_removed_ones_back() {
+    let hw = hardware();
+    let config = example_config();
+    let initial = plan(&hw, &config);
+    let restorer = Restorer::new(Arc::clone(&hw), &initial);
+    let mut controller = Controller::start(Arc::clone(&hw), initial).unwrap();
+    hw.clear_writes();
+
+    let new_plan = controller.resolve(&moved_case(4)).unwrap();
+    controller.replan(new_plan, &restorer).unwrap();
+
+    // pwm4: safe PWM first, then manual, then PWM again.
+    assert_eq!(
+        board_writes(&hw, "pwm4"),
+        [
+            Write::Pwm(format!("{BOARD}/pwm4"), 81),
+            Write::Enable(format!("{BOARD}/pwm4_enable"), 1),
+            Write::Pwm(format!("{BOARD}/pwm4"), 81),
+        ]
+    );
+    // pwm3: back to its original automatic mode.
+    assert_eq!(
+        board_writes(&hw, "pwm3"),
+        [Write::Enable(format!("{BOARD}/pwm3_enable"), 2)]
+    );
+    // pwm1 kept: not written at all.
+    assert_eq!(board_writes(&hw, "pwm1"), []);
+    assert!(board_writes(&hw, "pwm2").is_empty(), "pump written");
+    assert_eq!(board(&hw, "pwm4_enable"), "1");
+    assert_eq!(board(&hw, "pwm3_enable"), "2");
+
+    // The restorer follows the new plan, with the original mode of pwm1
+    // (read as manual by the second resolve) still automatic.
+    let restore: Vec<(String, u32)> = restorer
+        .outputs()
+        .into_iter()
+        .map(|(id, output, mode)| (id, output.index * 10 + mode.raw()))
+        .collect();
+    assert_eq!(
+        restore,
+        [("radiator".to_string(), 12), ("case".to_string(), 42)]
+    );
+    assert!(restorer.restore());
+    assert_eq!(board(&hw, "pwm1_enable"), "2");
+    assert_eq!(board(&hw, "pwm4_enable"), "2");
+}
+
+#[test]
+fn replan_keeps_running_fans_and_applies_safety_to_new_ones() {
+    let hw = hardware();
+    let initial = plan(&hw, &example_config());
+    let restorer = Restorer::new(Arc::clone(&hw), &initial);
+    let mut controller = Controller::start(Arc::clone(&hw), initial).unwrap();
+
+    // CPU critical while the new fan is added: it starts at 100 %.
+    set_cpu_temp(&hw, "90000");
+    let new_plan = controller.resolve(&moved_case(4)).unwrap();
+    controller.replan(new_plan, &restorer).unwrap();
+    assert_eq!(board(&hw, "pwm4"), "255");
+    controller.tick().unwrap();
+    assert_eq!(board(&hw, "pwm1"), "255");
+    let ids: Vec<String> = controller
+        .snapshot()
+        .fans
+        .into_iter()
+        .map(|f| f.id)
+        .collect();
+    assert_eq!(ids, ["radiator", "case"]);
+}
+
+#[test]
+fn replan_undoes_everything_when_a_takeover_fails() {
+    let hw = hardware();
+    let initial = plan(&hw, &example_config());
+    let restorer = Restorer::new(Arc::clone(&hw), &initial);
+    let mut controller = Controller::start(Arc::clone(&hw), initial.clone()).unwrap();
+    let mut config = moved_case(4);
+    config.fans.push(config::FanConfig {
+        id: "rear".into(),
+        label: "Rear".into(),
+        pwm: 5,
+        ..config.fans[0].clone()
+    });
+    hw.fail_writes_to(&format!("{BOARD}/pwm5_enable"));
+
+    let new_plan = controller.resolve(&config).unwrap();
+    let err = controller.replan(new_plan, &restorer).unwrap_err();
+    assert!(
+        matches!(err, ControlError::Takeover { ref fan, .. } if fan == "rear"),
+        "{err}"
+    );
+
+    // pwm4 was taken over, then handed back; pwm3 never left.
+    assert_eq!(board(&hw, "pwm4_enable"), "2");
+    assert_eq!(board(&hw, "pwm3_enable"), "1");
+    assert_eq!(controller.plan(), &initial);
+    let ids: Vec<String> = restorer.outputs().into_iter().map(|(id, ..)| id).collect();
+    assert_eq!(ids, ["radiator", "case"]);
+    assert!(board_writes(&hw, "pwm2").is_empty(), "pump written");
+}
+
+#[test]
+fn replan_undoes_everything_when_a_release_fails() {
+    let hw = hardware();
+    let initial = plan(&hw, &example_config());
+    let restorer = Restorer::new(Arc::clone(&hw), &initial);
+    let mut controller = Controller::start(Arc::clone(&hw), initial.clone()).unwrap();
+    hw.fail_writes_to(&format!("{BOARD}/pwm3_enable"));
+
+    let new_plan = controller.resolve(&moved_case(4)).unwrap();
+    let err = controller.replan(new_plan, &restorer).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "fan 'case': cannot hand the output back to the motherboard"
+    );
+    assert_eq!(board(&hw, "pwm4_enable"), "2", "new output handed back");
+    assert_eq!(controller.plan(), &initial);
+    // pwm3 still runs on its curve (its enable never left manual).
+    hw.clear_writes();
+    set_cpu_temp(&hw, "90000");
+    controller.tick().unwrap();
+    assert_eq!(board(&hw, "pwm3"), "255");
+}
+
+#[test]
+fn replan_from_no_fans_and_back() {
+    let hw = hardware();
+    let mut empty = example_config();
+    empty.fans.retain(|fan| fan.id == "pump");
+    let initial = plan(&hw, &empty);
+    let restorer = Restorer::new(Arc::clone(&hw), &initial);
+    let mut controller = Controller::start(Arc::clone(&hw), initial).unwrap();
+    assert!(hw.writes().is_empty());
+
+    let full = controller.resolve(&example_config()).unwrap();
+    controller.replan(full, &restorer).unwrap();
+    assert_eq!(board(&hw, "pwm1_enable"), "1");
+    assert_eq!(board(&hw, "pwm3_enable"), "1");
+
+    let back = controller.resolve(&empty).unwrap();
+    controller.replan(back, &restorer).unwrap();
+    assert_eq!(board(&hw, "pwm1_enable"), "2");
+    assert_eq!(board(&hw, "pwm3_enable"), "2");
+    assert!(restorer.outputs().is_empty());
+    assert!(board_writes(&hw, "pwm2").is_empty(), "pump written");
+}

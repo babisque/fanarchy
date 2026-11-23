@@ -271,3 +271,20 @@ test("panel payload names the clicked monitor", () => {
   assert.equal(Client.panelPayload(""), "");
   assert.equal(Client.panelPayload(null), "");
 });
+
+test("setup requests: list_outputs and apply_setup", () => {
+  assert.equal(Client.requestLine(Client.listOutputsRequest()), '{"cmd":"list_outputs"}\n');
+  const pumps = [{ id: "pump", label: "AIO pump", chip: "board", pwm: 2 }];
+  const fans = [{ id: "case", label: "Case fans", chip: "board", pwm: 3, sensor: "cpu/temp1", min_percent: 20, curve: [[40, 30], [85, 100]] }];
+  const request = Client.applySetupRequest(pumps, fans);
+  assert.deepEqual(JSON.parse(JSON.stringify(request)), { cmd: "apply_setup", pumps, fans });
+  fans[0].id = "changed";
+  assert.equal(request.fans[0].id, "case", "the request is a copy");
+  assert.equal(Client.requestLine(request).split("\n").length, 2);
+});
+
+test("isPending finds a waiting request by cmd", () => {
+  assert.equal(Client.isPending([{ cmd: "get_config" }, { cmd: "list_outputs" }], "list_outputs"), true);
+  assert.equal(Client.isPending([{ cmd: "get_config" }], "list_outputs"), false);
+  assert.equal(Client.isPending(null, "list_outputs"), false);
+});

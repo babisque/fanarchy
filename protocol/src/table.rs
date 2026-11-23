@@ -1,9 +1,10 @@
-//! Text tables for `fanarchyd status` and `fanarchyctl status`.
+//! Text tables for `fanarchyd status`, `fanarchyctl status` and
+//! `fanarchyctl outputs`.
 //!
 //! Pure functions only: readings in, aligned text table out.
 
 use crate::hardware::{Chip, GpuTemp, PwmMode, pwm_to_percent};
-use crate::{FanMode, FanStatus, Override, Role};
+use crate::{AssignedKind, FanMode, FanStatus, OutputInfo, OutputList, Override, Role};
 
 /// Shown in the CHIP column for GPUs read through `nvidia-smi`.
 const GPU_SOURCE: &str = "nvidia-smi";
@@ -219,6 +220,38 @@ fn fan_mode_text(fan: &FanStatus) -> String {
     }
 }
 
+/// Render every `pwmN` output on the configured chips.
+pub fn render_outputs(list: &OutputList) -> String {
+    if list.outputs.is_empty() {
+        return String::from("No PWM outputs on the configured chips.\n");
+    }
+    let header = ["OUTPUT", "PATH", "MODE", "SPEED", "RPM", "ASSIGNED"];
+    let mut rows = vec![header.iter().map(|h| h.to_string()).collect::<Vec<_>>()];
+    rows.extend(list.outputs.iter().map(output_cells));
+    align(&rows, &[3, 4])
+}
+
+fn output_cells(output: &OutputInfo) -> Vec<String> {
+    let assigned = match (&output.assigned.kind, &output.assigned.id) {
+        (AssignedKind::Fan, Some(id)) => format!("fan '{id}'"),
+        (AssignedKind::Pump, Some(id)) => format!("pump '{id}'"),
+        _ => NO_LABEL.to_string(),
+    };
+    vec![
+        format!("pwm{} · {}", output.pwm, output.chip),
+        output.path.clone(),
+        output
+            .mode
+            .map_or(UNAVAILABLE, |mode| mode.as_str())
+            .to_string(),
+        output
+            .percent
+            .map_or(UNAVAILABLE.to_string(), |p| format!("{p} %")),
+        rpm_text(output.rpm),
+        assigned,
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -373,5 +406,63 @@ rear      REAR      -              n/a  1200 RPM   bios  auto
     #[test]
     fn no_fans_says_so() {
         assert_eq!(render_fans(&[]), "No fans configured.\n");
+    }
+
+    fn output(
+        pwm: u32,
+        mode: Option<crate::OutputMode>,
+        kind: AssignedKind,
+        id: Option<&str>,
+    ) -> OutputInfo {
+        OutputInfo {
+            chip: "board".into(),
+            pwm,
+            path: format!("/sys/class/hwmon/hwmon1/pwm{pwm}"),
+            mode,
+            percent: Some(40),
+            rpm: if pwm == 4 { None } else { Some(793) },
+            rpm_input: if pwm == 4 { None } else { Some(pwm) },
+            assigned: crate::Assignment {
+                kind,
+                id: id.map(str::to_string),
+            },
+        }
+    }
+
+    #[test]
+    fn renders_outputs_table() {
+        use crate::OutputMode;
+        let list = OutputList {
+            starter_curve: vec![(40.0, 30.0), (85.0, 100.0)],
+            outputs: vec![
+                output(1, Some(OutputMode::Manual), AssignedKind::Fan, Some("case")),
+                output(
+                    2,
+                    Some(OutputMode::Automatic),
+                    AssignedKind::Pump,
+                    Some("pump"),
+                ),
+                output(4, None, AssignedKind::None, None),
+            ],
+        };
+        let expected = "\
+OUTPUT        PATH                          MODE       SPEED      RPM  ASSIGNED
+pwm1 · board  /sys/class/hwmon/hwmon1/pwm1  manual      40 %  793 RPM  fan 'case'
+pwm2 · board  /sys/class/hwmon/hwmon1/pwm2  automatic   40 %  793 RPM  pump 'pump'
+pwm4 · board  /sys/class/hwmon/hwmon1/pwm4  n/a         40 %      n/a  -
+";
+        assert_eq!(render_outputs(&list), expected);
+    }
+
+    #[test]
+    fn no_outputs_says_so() {
+        let list = OutputList {
+            starter_curve: Vec::new(),
+            outputs: Vec::new(),
+        };
+        assert_eq!(
+            render_outputs(&list),
+            "No PWM outputs on the configured chips.\n"
+        );
     }
 }
