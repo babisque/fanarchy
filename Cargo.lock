@@ -143,7 +143,7 @@ dependencies = [
 
 [[package]]
 name = "fanarchy-protocol"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -151,7 +151,7 @@ dependencies = [
 
 [[package]]
 name = "fanarchyctl"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -164,7 +164,7 @@ dependencies = [
 
 [[package]]
 name = "fanarchyd"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "clap",

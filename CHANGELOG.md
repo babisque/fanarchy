@@ -8,6 +8,8 @@ additive changes (new commands or optional fields) are minor.
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-23
+
 ### Added
 
 - Setup wizard in the panel. **START SETUP** (and **SETUP** in the footer
@@ -88,5 +90,6 @@ First public release.
   `sysusers.d`.
 - CI: `cargo fmt`, `cargo clippy`, `cargo test` and the plugin model tests.
 
+[1.1.0]: https://github.com/babisque/fanarchy/releases/tag/v1.1.0
 [1.0.1]: https://github.com/babisque/fanarchy/releases/tag/v1.0.1
 [1.0.0]: https://github.com/babisque/fanarchy/releases/tag/v1.0.0

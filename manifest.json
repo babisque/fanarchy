@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.babisque.fanarchy",
   "name": "Fanarchy",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "author": "babisque",
   "license": "MIT",
   "description": "Fan curves for Omarchy. No masters, no stock curves.",
