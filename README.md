@@ -6,7 +6,7 @@
 
 <p align="center"><strong>No masters. No stock curves.</strong></p>
 
-<p align="center"><code>yay -S fanarchy</code></p>
+<p align="center"><code>yay -S fanarchy</code> <em>(coming soon)</em></p>
 
 ---
 
@@ -26,11 +26,15 @@ It has three parts:
 
 ## Install
 
+AUR registration is temporarily closed, so the `fanarchy` AUR package isn't live yet. Until it is, build the same package from this repository:
+
 ```sh
-yay -S fanarchy                                                   # daemon, CLI, service, fanarchy group
+git clone https://github.com/babisque/fanarchy && cd fanarchy/packaging && makepkg -si  # daemon, CLI, service, fanarchy group
 sudo fanarchyctl init                                             # detects your hardware, writes a starter config
 omarchy plugin add https://github.com/babisque/fanarchy --enable  # bar widget + panel
 ```
+
+Coming soon: `yay -S fanarchy` will replace the first line once the AUR package is published.
 
 The package does **not** enable or start the daemon, and the starter config controls **no** fans. Before starting it:
 
@@ -159,7 +163,7 @@ Some chips (the IT8689E included) report garbage in `pwmN` while `pwmN_enable` i
 ```sh
 omarchy plugin remove io.github.babisque.fanarchy
 sudo systemctl disable --now fanarchyd   # hands every fan back to the motherboard
-yay -R fanarchy
+sudo pacman -R fanarchy                  # or fanarchy-git if you installed that one
 sudo rm -r /etc/fanarchy                 # optional: your config
 sudo groupdel fanarchy                   # optional
 ```

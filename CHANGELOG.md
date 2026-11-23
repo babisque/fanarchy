@@ -33,8 +33,10 @@ First public release.
 - Omarchy shell plugin `io.github.babisque.fanarchy`: a bar widget with CPU
   temperature and fan state, and a panel with per-fan cards, a draggable
   curve editor and curve / fixed / motherboard modes.
-- AUR packages `fanarchy` and `fanarchy-git`, a sandboxed systemd unit that
-  stays disabled after install, and the `fanarchy` group via `sysusers.d`.
+- `PKGBUILD`s for `fanarchy` and `fanarchy-git` (AUR listing coming soon;
+  build with `makepkg -si` from `packaging/` until then), a sandboxed systemd
+  unit that stays disabled after install, and the `fanarchy` group via
+  `sysusers.d`.
 - CI: `cargo fmt`, `cargo clippy`, `cargo test` and the plugin model tests.
 
 [1.0.0]: https://github.com/babisque/fanarchy/releases/tag/v1.0.0
