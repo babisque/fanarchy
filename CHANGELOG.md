@@ -5,6 +5,28 @@ All notable changes to Fanarchy are listed here. The format follows
 [Semantic Versioning](https://semver.org/). Any change to the socket protocol
 (`docs/protocol.md`) or the config schema is a major version.
 
+## [1.0.1] - 2026-11-23
+
+### Security
+
+- Pump outputs are now protected at the physical level. Before, a fan and a
+  pump that used different chip aliases for the same chip (e.g.
+  `"board": "it8689"` and `"board2": "it8689_61030507"`) could both claim the
+  same `pwmN`, pass validation, and the daemon would drive the pump. Every
+  entry, pumps included, is now resolved to its hwmon device and `pwmN`, and
+  the daemon refuses to start, `reload` or `set_curve` when a fan lands on a
+  pump's output or two entries share an output. Reported in the Omarchy
+  plugin marketplace review.
+- Defence in depth: the control loop refuses any write to a pump's output,
+  whatever the resolved plan says, and so does the in-process restore.
+  `fanarchyd restore` skips a fan on any output a pump could be on.
+
+### Changed
+
+- Two aliases in `chips` that resolve to the same chip are rejected. Use one
+  alias per chip.
+- A pump whose chip is not found is now an error instead of being ignored.
+
 ## [1.0.0] - 2026-11-22
 
 First public release.
@@ -39,4 +61,5 @@ First public release.
   `sysusers.d`.
 - CI: `cargo fmt`, `cargo clippy`, `cargo test` and the plugin model tests.
 
+[1.0.1]: https://github.com/babisque/fanarchy/releases/tag/v1.0.1
 [1.0.0]: https://github.com/babisque/fanarchy/releases/tag/v1.0.0
