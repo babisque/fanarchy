@@ -210,14 +210,21 @@ function togglePump(draft, key) {
   if (row.pump) {
     row.saved = { control: row.control, label: row.label, id: row.id, idEdited: row.idEdited }
     row.control = false
-    row.label = "Pump"
     row.id = uniqueId("pump", takenIds(next, key))
+    row.label = pumpLabel(row.id)
     row.idEdited = false
     next.noPump = false
   } else {
     restoreFanFields(row)
   }
   return next
+}
+
+// The label that goes with a proposed pump id: "pump" -> "Pump",
+// "pump-2" -> "Pump 2", so two pumps never show the same name.
+function pumpLabel(id) {
+  var match = /^pump-(\d+)$/.exec(String(id))
+  return match ? "Pump " + match[1] : "Pump"
 }
 
 // What the row was before it was marked as a pump.

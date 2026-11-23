@@ -392,6 +392,14 @@ mod tests {
         assert_eq!(config.fans[1].role, Role::Pump);
         assert_eq!(config.fans[1].pwm, 4);
         assert_eq!(config.fans[1].min_percent, None);
+
+        // Two pumps can never share an id.
+        let result = build_config(&current, &[pump("pump", 2), pump("pump", 4)], &[]);
+        let error = result.unwrap_err().to_string();
+        assert!(
+            error.starts_with("invalid setup: fan id 'pump' is used more than once"),
+            "{error}"
+        );
     }
 
     #[test]

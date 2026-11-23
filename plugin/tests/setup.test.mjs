@@ -125,6 +125,40 @@ test("marking a pump unlocks NEXT; I HAVE NO PUMP too", () => {
   assert.equal(plain(draft).rows[1].pump, false, "input never changes");
 });
 
+test("several pumps get numbered ids and labels", () => {
+  let draft = Setup.initialDraft(freshOutputs, empty);
+  draft = Setup.togglePump(draft, "board/2");
+  draft = Setup.togglePump(draft, "board/4");
+  draft = Setup.togglePump(draft, "board/5");
+  const pumps = plain(Setup.payload(draft, STARTER)).pumps;
+  assert.deepEqual(pumps.map((p) => [p.pwm, p.id, p.label]), [
+    [2, "pump", "Pump"],
+    [4, "pump-2", "Pump 2"],
+    [5, "pump-3", "Pump 3"],
+  ]);
+  assert.deepEqual(plain(Setup.summary(draft, STARTER)).pumps.map((p) => p.name), ["PUMP", "PUMP 2", "PUMP 3"]);
+  assert.deepEqual(plain(Setup.validateDraft(draft)), {});
+
+  // Unmarking the first frees "pump" for the next one marked.
+  draft = Setup.togglePump(draft, "board/2");
+  draft = Setup.togglePump(draft, "board/1");
+  const ids = plain(Setup.payload(draft, STARTER)).pumps.map((p) => p.id);
+  assert.deepEqual(ids, ["pump", "pump-2", "pump-3"]);
+  assert.equal(new Set(ids).size, ids.length);
+});
+
+test("a new pump next to a locked one is numbered after it", () => {
+  const draft = Setup.togglePump(Setup.initialDraft(configuredOutputs, config), "board/4");
+  const pumps = plain(Setup.payload(draft, STARTER)).pumps;
+  assert.deepEqual(pumps.map((p) => [p.id, p.label]), [["pump", "AIO pump"], ["pump-2", "Pump 2"]]);
+});
+
+test("pumpLabel follows the proposed id", () => {
+  assert.equal(Setup.pumpLabel("pump"), "Pump");
+  assert.equal(Setup.pumpLabel("pump-2"), "Pump 2");
+  assert.equal(Setup.pumpLabel("pump-12"), "Pump 12");
+});
+
 test("a fan marked as pump by mistake gets its fields back", () => {
   const draft = Setup.initialDraft(configuredOutputs, config);
   const pumped = Setup.togglePump(draft, "board/1");
